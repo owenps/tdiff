@@ -1,4 +1,4 @@
-# tdiff ∓
+# tdiff `∓`
 
 Fast local diff review with annotations for humans + agents.
 

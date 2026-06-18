@@ -20,7 +20,7 @@ func TestDiffPaneRendersUnifiedAnnotationAndRange(t *testing.T) {
 	m.cursor.MoveLine(1, 10)
 
 	out := xansi.Strip(m.renderDiff(4))
-	for _, want := range []string{"@@ -1 +1 @@", "╭", "●", "-old", "╰", "+new"} {
+	for _, want := range []string{"@@ -1 +1 @@", "╭", "●", "- old", "╰", "+ new"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("rendered diff missing %q:\n%s", want, out)
 		}

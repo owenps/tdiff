@@ -116,13 +116,8 @@ func (p diffPane) formatLine(dl displayLine, selected, inRange bool, rangeGlyph 
 
 func (p diffPane) formatSplitLine(l diff.Line, marker string, selected, inRange bool, rangeGlyph string, syntaxOK bool) string {
 	oldText, newText := "", ""
-	oldNo, newNo := "", ""
-	if l.OldNo > 0 {
-		oldNo = fmt.Sprintf("%2d", l.OldNo)
-	}
-	if l.NewNo > 0 {
-		newNo = fmt.Sprintf("%2d", l.NewNo)
-	}
+	oldNo := lineNoText(l.OldNo)
+	newNo := lineNoText(l.NewNo)
 	body := strings.TrimPrefix(strings.TrimPrefix(l.Text, "+"), "-")
 	switch l.Kind {
 	case diff.Delete:
@@ -155,20 +150,30 @@ func (p diffPane) formatSplitLine(l diff.Line, marker string, selected, inRange 
 }
 
 func (p diffPane) formatUnifiedLine(l diff.Line, marker string, selected, inRange bool, rangeGlyph string, syntaxOK bool) string {
-	oldNo, newNo := "", ""
-	if l.OldNo > 0 {
-		oldNo = fmt.Sprintf("%2d", l.OldNo)
-	}
-	if l.NewNo > 0 {
-		newNo = fmt.Sprintf("%2d", l.NewNo)
-	}
+	oldNo := lineNoText(l.OldNo)
+	newNo := lineNoText(l.NewNo)
+	diffSign, body := diffMarkerBody(l.Text)
 	prefix := rangeCell(rangeGlyph, selected, inRange) + gutterView(" ", selected, inRange) + annotationMarker(marker, selected, inRange)
-	rest := p.lineNoView(oldNo, l.Kind, selected, inRange) + gutterView(" ", selected, inRange) + p.lineNoView(newNo, l.Kind, selected, inRange) + gutterView(" ", selected, inRange) + p.diffTextView(l.Kind, l.Text, selected, inRange, syntaxOK)
+	rest := p.lineNoView(oldNo, l.Kind, selected, inRange) + gutterView(" ", selected, inRange) + p.lineNoView(newNo, l.Kind, selected, inRange) + gutterView(" ", selected, inRange) + diffSignView(diffSign, l.Kind, selected, inRange) + gutterView(" ", selected, inRange) + p.diffTextView(l.Kind, body, selected, inRange, syntaxOK)
 	if selected {
 		line := rangeCell(rangeGlyph, true, inRange) + selectedStyle.Render(" ") + annotationMarker(marker, true, inRange) + rest
 		return padRightStyled(truncate(line, p.width), p.width, selectedStyle)
 	}
 	return truncate(prefix+rest, p.width)
+}
+
+func lineNoText(n int) string {
+	if n <= 0 {
+		return strings.Repeat(" ", lineNoWidth)
+	}
+	return fmt.Sprintf("%*d", lineNoWidth, n)
+}
+
+func diffSignView(marker string, kind diff.Kind, selected, inRange bool) string {
+	if marker == "" {
+		marker = " "
+	}
+	return diffTextColor(kind, marker, selected, inRange)
 }
 
 func (p diffPane) lineNoView(s string, kind diff.Kind, selected, inRange bool) string {
@@ -195,25 +200,13 @@ func (p diffPane) diffTextView(kind diff.Kind, s string, selected, inRange, synt
 	if !syntaxOK || kind == diff.Meta {
 		return diffTextColor(kind, s, selected, inRange)
 	}
-	marker, body := diffMarkerBody(s)
 	if selected {
-		prefix := ""
-		if marker != "" {
-			prefix = selectedColorLine(kind, marker)
-		}
-		return prefix + withANSIBackground(p.syntaxView(body), selectedBg)
+		return withANSIBackground(p.syntaxView(s), selectedBg)
 	}
 	if inRange {
-		prefix := ""
-		if marker != "" {
-			prefix = rangeColorLine(kind, marker)
-		}
-		return prefix + withANSIBackground(p.syntaxView(body), rangeBg)
+		return withANSIBackground(p.syntaxView(s), rangeBg)
 	}
-	if marker != "" {
-		return colorLine(kind, marker) + p.syntaxView(body)
-	}
-	return p.syntaxView(body)
+	return p.syntaxView(s)
 }
 
 func (p diffPane) splitTextView(kind diff.Kind, side notes.Side, s string, selected, inRange, syntaxOK bool) string {

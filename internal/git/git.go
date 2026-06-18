@@ -70,7 +70,11 @@ func (r Repo) Diff(ctx context.Context, opts DiffOptions) (string, error) {
 			}
 		}
 		if base != "" {
-			args = append(args, base+"...HEAD")
+			baseRev, err := r.mergeBase(ctx, base, "HEAD")
+			if err != nil {
+				return "", err
+			}
+			args = append(args, baseRev)
 			tracked, err := run(ctx, "git", args...)
 			if err != nil {
 				return "", err
@@ -111,6 +115,14 @@ func (r Repo) DefaultBase(ctx context.Context) (string, error) {
 func (r Repo) hasRev(ctx context.Context, rev string) bool {
 	_, err := run(ctx, "git", "-C", r.Root, "rev-parse", "--verify", "--quiet", rev+"^{commit}")
 	return err == nil
+}
+
+func (r Repo) mergeBase(ctx context.Context, a, b string) (string, error) {
+	out, err := run(ctx, "git", "-C", r.Root, "merge-base", a, b)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
 }
 
 func (r Repo) untrackedDiff(ctx context.Context) (string, error) {

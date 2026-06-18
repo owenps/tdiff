@@ -905,6 +905,7 @@ func (m *Model) saveAnnotation() error {
 
 const (
 	sidebarWidth          = 38
+	lineNoWidth           = 4
 	syntaxMaxFileLines    = 2500
 	syntaxMaxLineWidth    = 500
 	syntaxCacheMaxEntries = 4000

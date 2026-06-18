@@ -43,6 +43,7 @@ type Model struct {
 	split               bool
 	syntax              bool
 	contextDim          bool
+	wrapCursorLine      bool
 	showHelp            bool
 	hideViewed          bool
 	annotationsOnly     bool
@@ -224,6 +225,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = "annotations copied"
 			}
 		case "w":
+			m.pendingKey = ""
+			m.wrapCursorLine = !m.wrapCursorLine
+			m.status = fmt.Sprintf("wrap cursor line: %t", m.wrapCursorLine)
+		case "W":
 			m.pendingKey = ""
 			m.cfg.IgnoreWhitespace = !m.cfg.IgnoreWhitespace
 			if err := m.reload(context.Background()); err != nil {
@@ -920,7 +925,8 @@ func (m Model) renderHelp() string {
 		"  b          show/hide sidebar",
 		"  x          syntax highlighting",
 		"  c          context dimming",
-		"  w          whitespace",
+		"  w          wrap cursor line",
+		"  W          whitespace",
 		"  R          refresh diff",
 		"  ?          close help",
 	}

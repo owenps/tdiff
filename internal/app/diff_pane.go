@@ -22,6 +22,7 @@ type diffPane struct {
 	split           bool
 	syntax          bool
 	contextDim      bool
+	wrapCursorLine  bool
 	syntaxCache     map[string]string
 	cursor          review.Cursor
 	workflow        annotations.Workflow
@@ -48,6 +49,7 @@ func (m Model) diffPane(width int) diffPane {
 		split:           m.split,
 		syntax:          m.syntax,
 		contextDim:      m.contextDim,
+		wrapCursorLine:  m.wrapCursorLine,
 		syntaxCache:     m.syntaxCache,
 		cursor:          m.session.Cursor(),
 		workflow:        m.annotations,
@@ -220,10 +222,14 @@ func (p diffPane) syntaxAllowed(lineCount int) bool {
 
 func (p diffPane) formatLine(dl displayLine, selected, inRange bool, rangeGlyph string, syntaxOK bool, intralineAgainst string) string {
 	if dl.Line == nil {
-		text := truncate(railPrefix(rangeGlyph)+dl.Text, p.width)
+		text := railPrefix(rangeGlyph) + dl.Text
 		if selected {
-			return padRightStyled(selectedHunkStyle.Render(text), p.width, selectedStyle)
+			if p.wrapCursorLine {
+				return wrapPadded(selectedHunkStyle.Render(text), p.width, selectedStyle)
+			}
+			return padRightStyled(selectedHunkStyle.Render(truncate(text, p.width)), p.width, selectedStyle)
 		}
+		text = truncate(text, p.width)
 		if inRange {
 			return rangeHunkStyle.Render(text)
 		}
@@ -350,12 +356,42 @@ func (p diffPane) formatUnifiedLine(l diff.Line, marker string, selected, inRang
 	if intralineAgainst != "" && (l.Kind == diff.Add || l.Kind == diff.Delete) {
 		bodyView = p.intralineTextView(l.Kind, body, intralineAgainst, selected, inRange, syntaxOK)
 	}
-	rest := p.lineNoView(oldNo, l.Kind, selected, inRange) + gutterView(" ", selected, inRange) + p.lineNoView(newNo, l.Kind, selected, inRange) + gutterView(" ", selected, inRange) + diffSignView(diffSign, l.Kind, selected, inRange) + gutterView(" ", selected, inRange) + bodyView
+	restPrefix := p.lineNoView(oldNo, l.Kind, selected, inRange) + gutterView(" ", selected, inRange) + p.lineNoView(newNo, l.Kind, selected, inRange) + gutterView(" ", selected, inRange) + diffSignView(diffSign, l.Kind, selected, inRange) + gutterView(" ", selected, inRange)
 	if selected {
-		line := railCell(railGlyph(marker, rangeGlyph), true, inRange) + selectedStyle.Render(" ") + rest
-		return padRightStyled(truncate(line, p.width), p.width, selectedStyle)
+		linePrefix := railCell(railGlyph(marker, rangeGlyph), true, inRange) + selectedStyle.Render(" ") + restPrefix
+		if p.wrapCursorLine {
+			return p.wrapSelectedLine(linePrefix, bodyView)
+		}
+		return padRightStyled(truncate(linePrefix+bodyView, p.width), p.width, selectedStyle)
 	}
-	return truncate(prefix+rest, p.width)
+	return truncate(prefix+restPrefix+bodyView, p.width)
+}
+
+func (p diffPane) wrapSelectedLine(prefix, body string) string {
+	prefixW := xansi.StringWidth(prefix)
+	if prefixW >= p.width {
+		return wrapPadded(prefix+body, p.width, selectedStyle)
+	}
+	bodyW := max(1, p.width-prefixW)
+	parts := strings.Split(xansi.Wrap(body, bodyW, " /._"), "\n")
+	rows := make([]string, 0, len(parts))
+	for i, part := range parts {
+		linePrefix := prefix
+		if i > 0 {
+			linePrefix = selectedStyle.Render(strings.Repeat(" ", prefixW))
+		}
+		rows = append(rows, padRightStyled(linePrefix+part, p.width, selectedStyle))
+	}
+	return strings.Join(rows, "\n")
+}
+
+func wrapPadded(s string, width int, style lipgloss.Style) string {
+	parts := strings.Split(xansi.Wrap(s, width, " /._"), "\n")
+	rows := make([]string, 0, len(parts))
+	for _, part := range parts {
+		rows = append(rows, padRightStyled(part, width, style))
+	}
+	return strings.Join(rows, "\n")
 }
 
 func lineNoText(n int) string {

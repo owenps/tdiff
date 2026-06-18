@@ -56,6 +56,31 @@ func TestReviewViewPadsToTerminalHeight(t *testing.T) {
 	}
 }
 
+func TestDiffPaneWrapsOnlySelectedLineWhenEnabled(t *testing.T) {
+	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@", Lines: []diff.Line{
+		{Kind: diff.Add, NewNo: 1, Text: "+one two three four five six seven eight"},
+	}}}}
+	store := &annotate.Store{}
+	m := Model{
+		store:          store,
+		annotations:    annotations.NewWorkflow(store),
+		session:        review.NewSession([]diff.File{file}),
+		wrapCursorLine: true,
+		width:          80,
+		syntax:         false,
+		syntaxCache:    make(map[string]string),
+	}
+	m.session.MoveLine(1, 10)
+
+	out := xansi.Strip(m.diffPane(28).Render(4))
+	if strings.Contains(out, "…") || !strings.Contains(out, "seven eight") {
+		t.Fatalf("selected line not wrapped fully:\n%s", out)
+	}
+	if got := len(strings.Split(out, "\n")); got < 3 {
+		t.Fatalf("wrapped lines=%d, want >=3:\n%s", got, out)
+	}
+}
+
 func TestDiffPaneKeepsSyntaxHighlightingOnAddDeleteLines(t *testing.T) {
 	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@", Lines: []diff.Line{
 		{Kind: diff.Delete, OldNo: 1, Text: "-func old() {}"},

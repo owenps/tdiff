@@ -1,5 +1,7 @@
 # tdiff `∓`
 
+[![Tests](https://github.com/owenps/tdiff/actions/workflows/tests.yml/badge.svg)](https://github.com/owenps/tdiff/actions/workflows/tests.yml)
+
 Fast local diff review with annotations for humans + agents.
 
 > [!NOTE]

@@ -21,6 +21,7 @@ type diffPane struct {
 	width       int
 	split       bool
 	syntax      bool
+	contextDim  bool
 	syntaxCache map[string]string
 	cursor      review.Cursor
 	annotations annotations.Workflow
@@ -46,6 +47,7 @@ func (m Model) diffPane(width int) diffPane {
 		width:       width,
 		split:       m.split,
 		syntax:      m.syntax,
+		contextDim:  m.contextDim,
 		syntaxCache: m.syntaxCache,
 		cursor:      m.cursor,
 		annotations: m.annotations,
@@ -58,6 +60,9 @@ func (m Model) syntaxAllowed(lineCount int) bool {
 }
 
 func (p diffPane) Render(height int) string {
+	if p.split {
+		return p.renderSplit(height)
+	}
 	style := lipgloss.NewStyle().Width(p.width)
 	lineCount := p.cursor.CurrentLineCount()
 	lineIdx := p.cursor.LineIndex()
@@ -85,6 +90,88 @@ func (p diffPane) Render(height int) string {
 	return style.Render(strings.Join(rows, "\n"))
 }
 
+type splitRow struct {
+	old    displayLine
+	new    displayLine
+	oldIdx int
+	newIdx int
+	hunk   string
+}
+
+func (p diffPane) renderSplit(height int) string {
+	style := lipgloss.NewStyle().Width(p.width)
+	lineCount := p.cursor.CurrentLineCount()
+	start := clamp(p.cursor.DiffOffset(), 0, max(0, lineCount-height))
+	end := min(lineCount, start+height)
+	lines := p.cursor.CurrentLinesRange(start, end)
+	syntaxOK := p.syntaxAllowed(lineCount)
+	rows := p.splitRows(lines, start)
+	if len(rows) > height {
+		rows = rows[:height]
+	}
+
+	var out []string
+	for _, row := range rows {
+		line := p.formatSplitRow(row, syntaxOK)
+		selected := row.oldIdx == p.cursor.LineIndex() || row.newIdx == p.cursor.LineIndex()
+		inRange := (row.oldIdx >= 0 && p.inActiveRange(row.oldIdx)) || (row.newIdx >= 0 && p.inActiveRange(row.newIdx))
+		if !selected {
+			if inRange {
+				line = padRightStyled(line, p.width, rangeStyle)
+			} else {
+				line = padRight(line, p.width)
+			}
+		}
+		out = append(out, line)
+	}
+	return style.Render(strings.Join(out, "\n"))
+}
+
+func (p diffPane) splitRows(lines []displayLine, start int) []splitRow {
+	var rows []splitRow
+	for i := 0; i < len(lines); i++ {
+		dl := lines[i]
+		idx := start + i
+		if dl.Line == nil {
+			rows = append(rows, splitRow{hunk: dl.Text, oldIdx: idx, newIdx: idx})
+			continue
+		}
+		if dl.Line.Kind != diff.Delete {
+			if dl.Line.Kind == diff.Add {
+				rows = append(rows, splitRow{new: dl, oldIdx: -1, newIdx: idx})
+			} else {
+				rows = append(rows, splitRow{old: dl, new: dl, oldIdx: idx, newIdx: idx})
+			}
+			continue
+		}
+
+		delStart := i
+		for i < len(lines) && lines[i].Line != nil && lines[i].Line.Kind == diff.Delete {
+			i++
+		}
+		delEnd := i
+		addStart := i
+		for i < len(lines) && lines[i].Line != nil && lines[i].Line.Kind == diff.Add {
+			i++
+		}
+		addEnd := i
+		for j := 0; j < max(delEnd-delStart, addEnd-addStart); j++ {
+			row := splitRow{oldIdx: -1, newIdx: -1}
+			if delStart+j < delEnd {
+				row.old = lines[delStart+j]
+				row.oldIdx = start + delStart + j
+			}
+			if addStart+j < addEnd {
+				row.new = lines[addStart+j]
+				row.newIdx = start + addStart + j
+			}
+			rows = append(rows, row)
+		}
+		i--
+	}
+	return rows
+}
+
 func (p diffPane) syntaxAllowed(lineCount int) bool {
 	return p.syntax && lineCount <= syntaxMaxFileLines && lexers.Match(p.path) != nil
 }
@@ -108,45 +195,103 @@ func (p diffPane) formatLine(dl displayLine, selected, inRange bool, rangeGlyph 
 			break
 		}
 	}
-	if p.split {
-		return p.formatSplitLine(l, marker, selected, inRange, rangeGlyph, syntaxOK)
-	}
 	return p.formatUnifiedLine(l, marker, selected, inRange, rangeGlyph, syntaxOK)
 }
 
-func (p diffPane) formatSplitLine(l diff.Line, marker string, selected, inRange bool, rangeGlyph string, syntaxOK bool) string {
-	oldText, newText := "", ""
-	oldNo := lineNoText(l.OldNo)
-	newNo := lineNoText(l.NewNo)
-	body := strings.TrimPrefix(strings.TrimPrefix(l.Text, "+"), "-")
-	switch l.Kind {
-	case diff.Delete:
-		oldText = body
-	case diff.Add:
-		newText = body
-	default:
-		oldText = body
-		newText = body
+func (p diffPane) formatSplitRow(row splitRow, syntaxOK bool) string {
+	if row.hunk != "" {
+		text := truncate(row.hunk, p.width)
+		if row.oldIdx == p.cursor.LineIndex() || row.newIdx == p.cursor.LineIndex() {
+			return padRightStyled(selectedHunkStyle.Render(text), p.width, selectedStyle)
+		}
+		if (row.oldIdx >= 0 && p.inActiveRange(row.oldIdx)) || (row.newIdx >= 0 && p.inActiveRange(row.newIdx)) {
+			return rangeHunkStyle.Render(text)
+		}
+		return hunkStyle.Render(text)
 	}
-	fixed := 10
+	selected := row.oldIdx == p.cursor.LineIndex() || row.newIdx == p.cursor.LineIndex()
+	inRange := (row.oldIdx >= 0 && p.inActiveRange(row.oldIdx)) || (row.newIdx >= 0 && p.inActiveRange(row.newIdx))
+	glyphIdx := row.oldIdx
+	if glyphIdx < 0 {
+		glyphIdx = row.newIdx
+	}
+	if selected {
+		glyphIdx = p.cursor.LineIndex()
+	}
+	rangeGlyph := p.rangeGlyph(glyphIdx)
+	marker := p.splitRowMarker(row)
+	prefix := rangeCell(rangeGlyph, selected, inRange) + gutterView(" ", selected, inRange) + annotationMarker(marker, selected, inRange)
+	fixed := 3 + lineNoWidth + 1 + 3 + lineNoWidth + 1
 	leftW := max(1, (p.width-fixed)/2)
 	rightW := max(1, p.width-fixed-leftW)
-	prefix := rangeCell(rangeGlyph, selected, inRange) + gutterView(" ", selected, inRange) + annotationMarker(marker, selected, inRange)
-	oldBody := fmt.Sprintf("%-*s", leftW, truncate(oldText, leftW))
-	newBody := fmt.Sprintf("%-*s", rightW, truncate(newText, rightW))
-	oldKind, newKind := diff.Context, diff.Context
-	if l.Kind == diff.Delete {
-		oldKind = diff.Delete
-	}
-	if l.Kind == diff.Add {
-		newKind = diff.Add
-	}
-	rest := p.lineNoView(oldNo, oldKind, selected, inRange) + gutterView(" │ ", selected, inRange) + p.splitTextView(l.Kind, notes.SideOld, oldBody, selected, inRange, syntaxOK) + gutterView(" │ ", selected, inRange) + p.lineNoView(newNo, newKind, selected, inRange) + gutterView(" ", selected, inRange) + p.splitTextView(l.Kind, notes.SideNew, newBody, selected, inRange, syntaxOK)
+	oldNo, oldKind := splitLineNoAndKind(row.old.Line, notes.SideOld)
+	newNo, newKind := splitLineNoAndKind(row.new.Line, notes.SideNew)
+	rest := p.lineNoView(oldNo, oldKind, selected, inRange) + gutterView(" ", selected, inRange) + p.splitCellText(row.old.Line, notes.SideOld, leftW, selected, inRange, syntaxOK) + gutterView(" │ ", selected, inRange) + p.lineNoView(newNo, newKind, selected, inRange) + gutterView(" ", selected, inRange) + p.splitCellText(row.new.Line, notes.SideNew, rightW, selected, inRange, syntaxOK)
+	line := prefix + rest
 	if selected {
-		line := rangeCell(rangeGlyph, true, inRange) + selectedStyle.Render(" ") + annotationMarker(marker, true, inRange) + rest
+		line = rangeCell(rangeGlyph, true, inRange) + selectedStyle.Render(" ") + annotationMarker(marker, true, inRange) + rest
 		return padRightStyled(truncate(line, p.width), p.width, selectedStyle)
 	}
-	return truncate(prefix+rest, p.width)
+	return truncate(line, p.width)
+}
+
+func splitLineNoAndKind(line *diff.Line, side notes.Side) (string, diff.Kind) {
+	if line == nil {
+		return lineNoText(0), diff.Context
+	}
+	if side == notes.SideOld {
+		kind := diff.Context
+		if line.Kind == diff.Delete {
+			kind = diff.Delete
+		}
+		return lineNoText(line.OldNo), kind
+	}
+	kind := diff.Context
+	if line.Kind == diff.Add {
+		kind = diff.Add
+	}
+	return lineNoText(line.NewNo), kind
+}
+
+func (p diffPane) splitCellText(line *diff.Line, side notes.Side, width int, selected, inRange, syntaxOK bool) string {
+	if line == nil || width <= 0 {
+		return gutterView(strings.Repeat(" ", max(0, width)), selected, inRange)
+	}
+	kind := diff.Context
+	if side == notes.SideOld && line.Kind == diff.Delete {
+		kind = diff.Delete
+	}
+	if side == notes.SideNew && line.Kind == diff.Add {
+		kind = diff.Add
+	}
+	marker, body := diffMarkerBody(line.Text)
+	bodyW := max(0, width-2)
+	text := diffSignView(marker, kind, selected, inRange) + gutterView(" ", selected, inRange) + p.syntaxBodyView(kind, truncate(body, bodyW), selected, inRange, syntaxOK)
+	return padRightStyled(text, width, splitCellPadStyle(selected, inRange))
+}
+
+func splitCellPadStyle(selected, inRange bool) lipgloss.Style {
+	if selected {
+		return selectedStyle
+	}
+	if inRange {
+		return rangeStyle
+	}
+	return lipgloss.NewStyle()
+}
+
+func (p diffPane) splitRowMarker(row splitRow) string {
+	for _, line := range []*diff.Line{row.old.Line, row.new.Line} {
+		if line == nil {
+			continue
+		}
+		for _, n := range p.notes {
+			if marker := p.annotations.MarkerFor(n, *line); marker != "" {
+				return marker
+			}
+		}
+	}
+	return " "
 }
 
 func (p diffPane) formatUnifiedLine(l diff.Line, marker string, selected, inRange bool, rangeGlyph string, syntaxOK bool) string {
@@ -206,6 +351,9 @@ func (p diffPane) diffTextView(kind diff.Kind, s string, selected, inRange, synt
 	if inRange {
 		return withANSIBackground(p.syntaxView(s), rangeBg)
 	}
+	if kind == diff.Context && p.contextDim {
+		return withANSIDim(p.syntaxView(s))
+	}
 	return p.syntaxView(s)
 }
 
@@ -244,7 +392,18 @@ func (p diffPane) syntaxBodyView(kind diff.Kind, s string, selected, inRange, sy
 	if inRange {
 		return withANSIBackground(p.syntaxView(s), rangeBg)
 	}
+	if kind == diff.Context && p.contextDim {
+		return withANSIDim(p.syntaxView(s))
+	}
 	return p.syntaxView(s)
+}
+
+func withANSIDim(s string) string {
+	if s == "" {
+		return s
+	}
+	dim := "\x1b[2m"
+	return dim + strings.ReplaceAll(s, "\x1b[0m", "\x1b[0m"+dim) + "\x1b[0m"
 }
 
 func withANSIBackground(s string, color lipgloss.Color) string {

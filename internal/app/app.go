@@ -44,6 +44,7 @@ type Model struct {
 	jumpInput     string
 	split         bool
 	syntax        bool
+	contextDim    bool
 	showHelp      bool
 	hideViewed    bool
 	notesOnly     bool
@@ -66,7 +67,7 @@ func New(ctx context.Context, cfg Config) (Model, error) {
 	if err != nil {
 		return Model{}, err
 	}
-	m := Model{repo: repo, cfg: cfg, store: store, annotations: annotations.NewWorkflow(store), syntax: true, syntaxCache: make(map[string]string)}
+	m := Model{repo: repo, cfg: cfg, store: store, annotations: annotations.NewWorkflow(store), syntax: true, contextDim: true, syntaxCache: make(map[string]string)}
 	m.editor = textarea.New()
 	m.editor.Placeholder = "annotation"
 	m.editor.CharLimit = 4000
@@ -184,6 +185,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingKey = ""
 			m.syntax = !m.syntax
 			m.status = fmt.Sprintf("syntax: %t", m.syntax)
+		case "c":
+			m.pendingKey = ""
+			m.contextDim = !m.contextDim
+			m.status = fmt.Sprintf("context dim: %t", m.contextDim)
 		case "u":
 			m.pendingKey = ""
 			m.hideViewed = !m.hideViewed
@@ -467,6 +472,17 @@ func (m Model) statsView(s diffStats) string {
 	return fmt.Sprintf("%s %s", addStyle.Render(fmt.Sprintf("+%d", s.Added)), deleteStyle.Render(fmt.Sprintf("-%d", s.Deleted)))
 }
 
+func (m Model) sidebarStatsView(s diffStats) string {
+	return fmt.Sprintf("%s %s", addStyle.Render(sidebarStat("+", s.Added)), deleteStyle.Render(sidebarStat("-", s.Deleted)))
+}
+
+func sidebarStat(prefix string, count int) string {
+	if count >= 1000 {
+		return fmt.Sprintf("%s%dk", prefix, count/1000)
+	}
+	return fmt.Sprintf("%s%d", prefix, count)
+}
+
 func (m Model) noteCount(path string) int {
 	return len(m.store.NotesFor(path))
 }
@@ -524,8 +540,8 @@ func sidebarColumnWidths(files []diff.File, noteCount func(string) int) (int, in
 	addW, delW, noteW := 2, 2, 2
 	for _, f := range files {
 		stats := fileStats(f)
-		addW = max(addW, xansi.StringWidth(fmt.Sprintf("+%d", stats.Added)))
-		delW = max(delW, xansi.StringWidth(fmt.Sprintf("-%d", stats.Deleted)))
+		addW = max(addW, xansi.StringWidth(sidebarStat("+", stats.Added)))
+		delW = max(delW, xansi.StringWidth(sidebarStat("-", stats.Deleted)))
 		if notes := noteCount(f.Path()); notes > 0 {
 			noteW = max(noteW, xansi.StringWidth(fmt.Sprintf("●%d", notes)))
 		}
@@ -669,7 +685,7 @@ func (m Model) renderSidebar(height int) string {
 	}
 	fileHeight := height - previewHeight
 	var rows []string
-	rows = append(rows, titleStyle.Render("tdiff")+" "+m.statsView(m.totalStats())+" "+m.notesView(m.totalNoteCount()))
+	rows = append(rows, titleStyle.Render("tdiff")+" "+m.sidebarStatsView(m.totalStats())+" "+m.notesView(m.totalNoteCount()))
 	start := clamp(fileIdx-fileHeight/2, 0, max(0, len(files)-fileHeight+1))
 	end := min(len(files), start+fileHeight-1)
 	for i := start; i < end; i++ {
@@ -685,8 +701,8 @@ func (m Model) renderSidebar(height int) string {
 		}
 		stats := fileStats(f)
 		noteCount := m.noteCount(path)
-		addedText := fmt.Sprintf("%*s", addW, fmt.Sprintf("+%d", stats.Added))
-		deletedText := fmt.Sprintf("%*s", delW, fmt.Sprintf("-%d", stats.Deleted))
+		addedText := fmt.Sprintf("%*s", addW, sidebarStat("+", stats.Added))
+		deletedText := fmt.Sprintf("%*s", delW, sidebarStat("-", stats.Deleted))
 		added := addStyle.Render(addedText)
 		deleted := deleteStyle.Render(deletedText)
 		line := fmt.Sprintf("%s%s %s %s %s %s", prefix, viewed, sidebarPath(path, nameW, false, viewed == "✓"), added, deleted, sidebarNoteView(noteCount, noteW, false))
@@ -793,6 +809,9 @@ func (m Model) renderStatus() string {
 	} else if !m.syntaxAllowed(m.cursor.CurrentLineCount()) {
 		parts = append(parts, dimStyle.Render("syntax-skipped"))
 	}
+	if !m.contextDim {
+		parts = append(parts, dimStyle.Render("context-dim-off"))
+	}
 	if m.cursor.RangeActive() {
 		start, end := m.cursor.RangeIndexes()
 		parts = append(parts, annotationStyle.Render(fmt.Sprintf("range %d–%d", start+1, end+1)))
@@ -802,13 +821,12 @@ func (m Model) renderStatus() string {
 	}
 	left := joinDim(parts, " · ")
 	right := m.footerHints()
-	sep := " · "
-	gap := max(1, m.width-xansi.StringWidth(left)-xansi.StringWidth(right)-xansi.StringWidth(sep)-1)
+	gap := max(1, m.width-xansi.StringWidth(left)-xansi.StringWidth(right)-1)
 	tailStyle := dimStyle
 	if m.cursor.RangeActive() {
 		tailStyle = rangeFooterStyle
 	}
-	line := left + strings.Repeat(" ", gap) + tailStyle.Render(sep+right)
+	line := left + strings.Repeat(" ", gap) + tailStyle.Render(right)
 	out := truncate(line, m.width-1)
 	if m.cursor.RangeActive() {
 		return rangeFooterStyle.Render(out)
@@ -844,7 +862,7 @@ func (m Model) footerHints() string {
 	if _, ok := m.selectedAnnotation(); ok {
 		return "e edit · d delete · ]a/[a notes · y copy"
 	}
-	return "a note · r range · v viewed · b sidebar · ? keys"
+	return "a note · r range · v viewed · b sidebar · ? help"
 }
 
 func (m Model) renderHelp() string {
@@ -871,6 +889,7 @@ func (m Model) renderHelp() string {
 		"  s          split/unified",
 		"  b          show/hide sidebar",
 		"  x          syntax highlighting",
+		"  c          context dimming",
 		"  w          whitespace",
 		"  R          refresh diff",
 		"  ?          close help",

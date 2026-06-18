@@ -37,6 +37,27 @@ func TestDiffPaneRendersSplitView(t *testing.T) {
 	}
 }
 
+func TestDiffPaneKeepsSyntaxHighlightingOnAddDeleteLines(t *testing.T) {
+	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@", Lines: []diff.Line{
+		{Kind: diff.Delete, OldNo: 1, Text: "-func old() {}"},
+		{Kind: diff.Add, NewNo: 1, Text: "+func main() {}"},
+	}}}}
+	store := &notes.Store{}
+	m := Model{
+		store:       store,
+		annotations: annotations.NewWorkflow(store),
+		cursor:      review.NewCursor([]diff.File{file}),
+		width:       120,
+		syntax:      true,
+		syntaxCache: make(map[string]string),
+	}
+
+	out := m.renderDiff(3)
+	if !strings.Contains(out, "\x1b[38;5;209mfunc") {
+		t.Fatalf("add/delete lines lost syntax highlighting:\n%q", out)
+	}
+}
+
 func diffPaneTestModel(split bool) Model {
 	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@", Lines: []diff.Line{
 		{Kind: diff.Delete, OldNo: 1, Text: "-old"},

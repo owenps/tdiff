@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -45,7 +46,11 @@ type Store struct {
 }
 
 func Open(gitRoot string) (*Store, error) {
-	path := filepath.Join(gitRoot, ".git", "tdiff", "notes.json")
+	gitDir, err := resolveGitDir(gitRoot)
+	if err != nil {
+		return nil, err
+	}
+	path := filepath.Join(gitDir, "tdiff", "notes.json")
 	store := &Store{path: path}
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -59,6 +64,32 @@ func Open(gitRoot string) (*Store, error) {
 	}
 	store.path = path
 	return store, nil
+}
+
+func resolveGitDir(gitRoot string) (string, error) {
+	gitPath := filepath.Join(gitRoot, ".git")
+	info, err := os.Stat(gitPath)
+	if err == nil && info.IsDir() {
+		return gitPath, nil
+	}
+	if err != nil {
+		return "", err
+	}
+
+	b, err := os.ReadFile(gitPath)
+	if err != nil {
+		return "", err
+	}
+	const prefix = "gitdir:"
+	text := strings.TrimSpace(string(b))
+	if !strings.HasPrefix(text, prefix) {
+		return "", fmt.Errorf("invalid .git file: %s", gitPath)
+	}
+	gitDir := filepath.Clean(strings.TrimSpace(strings.TrimPrefix(text, prefix)))
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(gitRoot, gitDir)
+	}
+	return gitDir, nil
 }
 
 func (s *Store) Save() error {

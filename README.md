@@ -44,6 +44,7 @@ tdiff export
 - <kbd>s</kbd> toggle split/unified placeholder
 - <kbd>b</kbd> show/hide left sidebar
 - <kbd>x</kbd> toggle syntax highlighting
+- <kbd>c</kbd> toggle context dimming
 - <kbd>r</kbd> start/cancel line range
 - <kbd>a</kbd> add annotation on selected line/range; edits existing annotation on selected line
 - <kbd>e</kbd> edit annotation on selected line/range

@@ -224,6 +224,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.status = fmt.Sprintf("ignore whitespace: %t", m.cfg.IgnoreWhitespace)
 			}
+		case "R":
+			m.pendingKey = ""
+			if err := m.reload(context.Background()); err != nil {
+				m.status = err.Error()
+			} else {
+				m.status = "diff refreshed"
+			}
 		case "v":
 			m.pendingKey = ""
 			path := m.currentPath()
@@ -865,6 +872,7 @@ func (m Model) renderHelp() string {
 		"  b          show/hide sidebar",
 		"  x          syntax highlighting",
 		"  w          whitespace",
+		"  R          refresh diff",
 		"  ?          close help",
 	}
 	boxWidth := min(56, max(36, m.width-6))

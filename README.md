@@ -38,6 +38,7 @@ tdiff export
 - `y` copy selected annotation
 - `Y` copy all annotations markdown
 - `w` toggle whitespace handling/reload diff
+- `R` refresh diff
 - `s` toggle split/unified placeholder
 - `b` show/hide left sidebar
 - `x` toggle syntax highlighting

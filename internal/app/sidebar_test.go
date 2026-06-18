@@ -28,7 +28,7 @@ func TestRenderSidebarUsesCompactedStats(t *testing.T) {
 	for i := range lines {
 		lines[i] = diff.Line{Kind: diff.Add, NewNo: i + 1, Text: "+x"}
 	}
-	m.cursor.SetFiles([]diff.File{{NewPath: "big.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1,1000 @@", Lines: lines}}}})
+	m.session.SetSnapshot([]diff.File{{NewPath: "big.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1,1000 @@", Lines: lines}}}}, "")
 
 	out := xansi.Strip(m.renderSidebar(5))
 	if !strings.Contains(out, "+1k") {

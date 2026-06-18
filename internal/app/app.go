@@ -32,9 +32,7 @@ type Model struct {
 	store       *annotate.Store
 	annotations annotations.Workflow
 
-	allFiles []diff.File
-	cursor   review.Cursor
-	diffHash string
+	session review.Session
 
 	width  int
 	height int
@@ -68,7 +66,8 @@ func New(ctx context.Context, cfg Config) (Model, error) {
 	if err != nil {
 		return Model{}, err
 	}
-	m := Model{repo: repo, cfg: cfg, store: store, annotations: annotations.NewWorkflow(store), syntax: true, contextDim: true, syntaxCache: make(map[string]string)}
+	m := Model{repo: repo, cfg: cfg, store: store, annotations: annotations.NewWorkflow(store), session: review.NewSession(nil), syntax: true, contextDim: true, syntaxCache: make(map[string]string)}
+	m.session.SetFilterSources(store.IsViewed, m.annotationCount)
 	m.editor = textarea.New()
 	m.editor.Placeholder = "annotation"
 	m.editor.CharLimit = 4000
@@ -104,7 +103,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.status = "annotation saved"
 					m.composing = false
 					m.composerBaseView = ""
-					m.cursor.CancelRange()
+					m.session.CancelRange()
 					m.editingAnnotationID = ""
 					m.pendingTarget = annotations.Target{}
 					m.editor.Blur()
@@ -114,7 +113,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "esc":
 				m.composing = false
 				m.composerBaseView = ""
-				m.cursor.CancelRange()
+				m.session.CancelRange()
 				m.editingAnnotationID = ""
 				m.pendingTarget = annotations.Target{}
 				m.editor.Blur()
@@ -171,16 +170,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "j", "down":
 			m.pendingKey = ""
-			m.cursor.MoveLine(1, m.bodyHeight())
+			m.session.MoveLine(1, m.bodyHeight())
 		case "k", "up":
 			m.pendingKey = ""
-			m.cursor.MoveLine(-1, m.bodyHeight())
+			m.session.MoveLine(-1, m.bodyHeight())
 		case "n", "right":
 			m.pendingKey = ""
-			m.cursor.MoveFile(1)
+			m.session.MoveFile(1)
 		case "p", "left":
 			m.pendingKey = ""
-			m.cursor.MoveFile(-1)
+			m.session.MoveFile(-1)
 		case "s":
 			m.pendingKey = ""
 			m.split = !m.split
@@ -243,11 +242,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingKey = ""
 			path := m.currentPath()
 			if path != "" {
-				if m.store.IsViewed(path, m.diffHash) {
+				if m.store.IsViewed(path, m.session.DiffHash()) {
 					_ = m.store.ClearViewed(path)
 					m.status = "unmarked viewed"
 				} else {
-					_ = m.store.MarkViewed(path, m.diffHash)
+					_ = m.store.MarkViewed(path, m.session.DiffHash())
 					if m.hideViewed {
 						m.applyFilters()
 						m.status = "marked viewed"
@@ -260,10 +259,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "r":
 			m.pendingKey = ""
-			if m.cursor.RangeActive() {
-				m.cursor.CancelRange()
+			if m.session.RangeActive() {
+				m.session.CancelRange()
 				m.status = "range cancelled"
-			} else if m.cursor.StartRange() {
+			} else if m.session.StartRange() {
 				m.status = "range started; move then press a"
 			} else {
 				m.status = "range must start on a diff line"
@@ -280,7 +279,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			m.pendingKey = ""
-			if m.cursor.RangeActive() {
+			if m.session.RangeActive() {
 				target, err := m.rangeTarget()
 				if err != nil {
 					m.status = err.Error()
@@ -340,8 +339,8 @@ func (m Model) View() string {
 }
 
 func (m Model) reviewView() string {
-	if len(m.cursor.Files()) == 0 {
-		if len(m.allFiles) > 0 {
+	if len(m.session.Files()) == 0 {
+		if len(m.session.AllFiles()) > 0 {
 			return dimStyle.Render("no files match filters · press u/m") + "\n"
 		}
 		return dimStyle.Render("clean tree · nothing to review") + "\n"
@@ -366,7 +365,7 @@ func (m Model) reviewView() string {
 		sidebar := m.renderSidebar(bodyHeight)
 		body = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, diffPane)
 	}
-	return body + "\n" + m.renderStatus()
+	return padBlockHeight(body, bodyHeight, m.width) + "\n" + m.renderStatus()
 }
 
 func (m *Model) reload(ctx context.Context) error {
@@ -374,35 +373,27 @@ func (m *Model) reload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	m.allFiles = s.Files
-	m.diffHash = s.Hash
+	m.session.SetSnapshot(s.Files, s.Hash)
 	m.syntaxCache = make(map[string]string)
-	m.applyFilters()
 	return nil
 }
 
 func (m *Model) applyFilters() {
-	m.cursor.SetFilteredFiles(m.allFiles, review.FileFilter{
-		HideViewed:      m.hideViewed,
-		AnnotationsOnly: m.annotationsOnly,
-		DiffHash:        m.diffHash,
-		IsViewed:        m.store.IsViewed,
-		AnnotationCount: m.annotationCount,
-	})
+	m.session.SetFilters(m.hideViewed, m.annotationsOnly)
 }
 
 type displayLine = review.DisplayLine
 
 func (m Model) currentLines() []displayLine {
-	return m.cursor.CurrentLines()
+	return m.session.CurrentLines()
 }
 
 func (m Model) selectedLine() displayLine {
-	return m.cursor.SelectedLine()
+	return m.session.SelectedLine()
 }
 
 func (m Model) selectedAnnotation() (annotate.Annotation, bool) {
-	return m.cursor.SelectedAnnotation(m.annotations.AnnotationAt)
+	return m.session.SelectedAnnotation(m.annotations.AnnotationAt)
 }
 
 func (m *Model) startEditAnnotation(annotation annotate.Annotation) {
@@ -425,26 +416,15 @@ func (m *Model) startNewAnnotation(target annotations.Target) {
 }
 
 func (m Model) singleLineTarget() (annotations.Target, error) {
-	dl := m.selectedLine()
-	if dl.Line == nil {
-		return annotations.Target{}, fmt.Errorf("no line selected")
-	}
-	return m.annotations.TargetForLine(annotations.DiffLine{Line: *dl.Line, HunkHeader: dl.HunkHeader})
+	return m.annotations.TargetForDisplayLine(m.selectedLine())
 }
 
 func (m Model) rangeTarget() (annotations.Target, error) {
-	var selected []annotations.DiffLine
-	for _, dl := range m.cursor.RangeLines() {
-		if dl.Line == nil {
-			continue
-		}
-		selected = append(selected, annotations.DiffLine{Line: *dl.Line, HunkHeader: dl.HunkHeader})
-	}
-	return m.annotations.TargetForRange(selected)
+	return m.annotations.TargetForDisplayRange(m.session.RangeLines())
 }
 
 func (m Model) currentPath() string {
-	return m.cursor.CurrentPath()
+	return m.session.CurrentPath()
 }
 
 type diffStats struct {
@@ -473,7 +453,7 @@ func fileStats(f diff.File) diffStats {
 
 func (m Model) totalStats() diffStats {
 	var total diffStats
-	for _, f := range m.cursor.Files() {
+	for _, f := range m.session.Files() {
 		s := fileStats(f)
 		total.Added += s.Added
 		total.Deleted += s.Deleted
@@ -514,12 +494,15 @@ func sidebarStat(prefix string, count int) string {
 }
 
 func (m Model) annotationCount(path string) int {
+	if m.store == nil {
+		return 0
+	}
 	return len(m.store.AnnotationsFor(path))
 }
 
 func (m Model) totalAnnotationCount() int {
 	total := 0
-	for _, f := range m.cursor.Files() {
+	for _, f := range m.session.Files() {
 		total += m.annotationCount(f.Path())
 	}
 	return total
@@ -656,21 +639,21 @@ func (m *Model) statusToastCmd(previous string) tea.Cmd {
 }
 
 func (m *Model) jumpTop() {
-	m.cursor.JumpTop()
+	m.session.JumpTop()
 }
 
 func (m *Model) jumpBottom() {
-	m.cursor.JumpBottom(m.bodyHeight())
+	m.session.JumpBottom(m.bodyHeight())
 }
 
 func (m *Model) nextHunk() {
-	if !m.cursor.NextHunk(m.bodyHeight()) {
+	if !m.session.NextHunk(m.bodyHeight()) {
 		m.status = "no next hunk"
 	}
 }
 
 func (m *Model) prevHunk() {
-	if !m.cursor.PrevHunk(m.bodyHeight()) {
+	if !m.session.PrevHunk(m.bodyHeight()) {
 		m.status = "no previous hunk"
 	}
 }
@@ -684,7 +667,7 @@ func (m *Model) prevAnnotation() {
 }
 
 func (m *Model) jumpAnnotation(delta int) {
-	idx, total, ok := m.cursor.JumpAnnotation(delta, m.bodyHeight(), m.store.AnnotationsFor)
+	idx, total, ok := m.session.JumpAnnotation(delta, m.bodyHeight(), m.store.AnnotationsFor)
 	if !ok {
 		m.status = "no annotations"
 		return
@@ -693,18 +676,18 @@ func (m *Model) jumpAnnotation(delta int) {
 }
 
 func (m *Model) jumpToFileLine(line int) bool {
-	return m.cursor.JumpToFileLine(line, m.bodyHeight())
+	return m.session.JumpToFileLine(line, m.bodyHeight())
 }
 
 func (m *Model) ensureCursorVisible() {
-	m.cursor.EnsureVisible(m.bodyHeight())
+	m.session.EnsureVisible(m.bodyHeight())
 }
 
 func (m Model) bodyHeight() int {
 	if m.height == 0 {
-		return 28
+		return 29
 	}
-	return max(1, m.height-1-m.footerHeight())
+	return max(1, m.height-m.footerHeight())
 }
 
 func (m Model) footerHeight() int {
@@ -712,13 +695,13 @@ func (m Model) footerHeight() int {
 }
 
 func (m *Model) advanceToNextUnviewed() bool {
-	return m.cursor.AdvanceToNextUnviewed(m.diffHash, m.store.IsViewed)
+	return m.session.AdvanceToNextUnviewed()
 }
 
 func (m Model) renderSidebar(height int) string {
 	style := lipgloss.NewStyle().Width(sidebarWidth)
-	files := m.cursor.Files()
-	fileIdx := m.cursor.FileIndex()
+	files := m.session.Files()
+	fileIdx := m.session.FileIndex()
 	nameW, addW, delW, annotationW := sidebarColumnWidths(files, m.annotationCount)
 	previewHeight := 0
 	if height >= 12 && m.totalAnnotationCount() > 0 {
@@ -737,7 +720,7 @@ func (m Model) renderSidebar(height int) string {
 			prefix = "▌ "
 		}
 		viewed := " "
-		if m.store.IsViewed(path, m.diffHash) {
+		if m.store.IsViewed(path, m.session.DiffHash()) {
 			viewed = "✓"
 		}
 		stats := fileStats(f)
@@ -761,7 +744,7 @@ func (m Model) renderSidebar(height int) string {
 }
 
 func (m Model) annotationPositions() []review.AnnotationPosition {
-	return m.cursor.AnnotationPositions(m.store.AnnotationsFor)
+	return m.session.AnnotationPositions(m.store.AnnotationsFor)
 }
 
 func (m Model) renderAnnotationPreview(maxRows int) []string {
@@ -811,7 +794,7 @@ func (m Model) renderAnnotationPreview(maxRows int) []string {
 
 func (m Model) renderDiffHeader(width int) string {
 	path := compactPath(m.currentPath(), max(12, width-18))
-	stats := m.statsView(fileStats(m.cursor.Files()[m.cursor.FileIndex()]))
+	stats := m.statsView(fileStats(m.session.Files()[m.session.FileIndex()]))
 	if annotations := m.annotationCount(m.currentPath()); annotations > 0 {
 		stats = strings.TrimSpace(stats + " " + annotationStyle.Render(fmt.Sprintf("●%d", annotations)))
 	}
@@ -827,12 +810,12 @@ func (m Model) renderStatus() string {
 	if mode == "" {
 		mode = string(git.ModeBranch)
 	}
-	files := m.cursor.Files()
+	files := m.session.Files()
 	stats := m.statsView(m.totalStats())
 	if annotations := m.totalAnnotationCount(); annotations > 0 {
 		stats = strings.TrimSpace(stats + " " + annotationStyle.Render(fmt.Sprintf("●%d", annotations)))
 	}
-	parts := []string{dimStyle.Render(mode), dimStyle.Render(fmt.Sprintf("%d/%d", min(m.cursor.FileIndex()+1, len(files)), len(files)))}
+	parts := []string{dimStyle.Render(mode), dimStyle.Render(fmt.Sprintf("%d/%d", min(m.session.FileIndex()+1, len(files)), len(files)))}
 	if stats != "" {
 		parts = append(parts, stats)
 	}
@@ -853,14 +836,14 @@ func (m Model) renderStatus() string {
 	}
 	if !m.syntax {
 		parts = append(parts, dimStyle.Render("syntax-off"))
-	} else if !m.syntaxAllowed(m.cursor.CurrentLineCount()) {
+	} else if !m.syntaxAllowed(m.session.CurrentLineCount()) {
 		parts = append(parts, dimStyle.Render("syntax-skipped"))
 	}
 	if !m.contextDim {
 		parts = append(parts, dimStyle.Render("context-dim-off"))
 	}
-	if m.cursor.RangeActive() {
-		start, end := m.cursor.RangeIndexes()
+	if m.session.RangeActive() {
+		start, end := m.session.RangeIndexes()
 		parts = append(parts, annotationStyle.Render(fmt.Sprintf("range %d–%d", start+1, end+1)))
 	}
 	if m.status != "" {
@@ -870,12 +853,12 @@ func (m Model) renderStatus() string {
 	right := m.footerHints()
 	gap := max(1, m.width-xansi.StringWidth(left)-xansi.StringWidth(right)-1)
 	tailStyle := dimStyle
-	if m.cursor.RangeActive() {
+	if m.session.RangeActive() {
 		tailStyle = rangeFooterStyle
 	}
 	line := left + strings.Repeat(" ", gap) + tailStyle.Render(right)
 	out := truncate(line, m.width-1)
-	if m.cursor.RangeActive() {
+	if m.session.RangeActive() {
 		return rangeFooterStyle.Render(out)
 	}
 	return out
@@ -900,7 +883,7 @@ func (m Model) footerHints() string {
 	if m.jumpPrompt {
 		return ":" + m.jumpInput + "  enter jump · esc cancel"
 	}
-	if m.cursor.RangeActive() {
+	if m.session.RangeActive() {
 		return "j/k extend · a annotate · r cancel"
 	}
 	if m.showHelp {
@@ -966,12 +949,13 @@ func (m *Model) saveAnnotation() error {
 			return err
 		}
 	}
-	return m.annotations.Save(m.currentPath(), m.diffHash, m.editingAnnotationID, target, m.editor.Value())
+	return m.annotations.Save(m.currentPath(), m.session.DiffHash(), m.editingAnnotationID, target, m.editor.Value())
 }
 
 const (
 	sidebarWidth          = 38
 	lineNoWidth           = 4
+	intralineContextLines = 200
 	syntaxMaxFileLines    = 2500
 	syntaxMaxLineWidth    = 500
 	syntaxCacheMaxEntries = 4000
@@ -981,6 +965,8 @@ const (
 var (
 	brandColor              = lipgloss.Color("180")
 	selectedBg              = lipgloss.Color("236")
+	addChangedBg            = lipgloss.Color("22")
+	deleteChangedBg         = lipgloss.Color("52")
 	annotationStyle         = lipgloss.NewStyle().Foreground(brandColor)
 	selectedAnnotationStyle = lipgloss.NewStyle().Foreground(brandColor).Background(selectedBg)
 	titleStyle              = lipgloss.NewStyle().Bold(true).Foreground(brandColor)
@@ -994,10 +980,10 @@ var (
 	selectedDimStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Background(selectedBg)
 	successStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
 	errorStyle              = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	hunkColor              = lipgloss.Color("99")
-	hunkStyle              = lipgloss.NewStyle().Foreground(hunkColor)
-	selectedHunkStyle      = lipgloss.NewStyle().Foreground(hunkColor).Background(selectedBg)
-	rangeHunkStyle         = lipgloss.NewStyle().Foreground(hunkColor).Background(rangeBg)
+	hunkColor               = lipgloss.Color("99")
+	hunkStyle               = lipgloss.NewStyle().Foreground(hunkColor)
+	selectedHunkStyle       = lipgloss.NewStyle().Foreground(hunkColor).Background(selectedBg)
+	rangeHunkStyle          = lipgloss.NewStyle().Foreground(hunkColor).Background(rangeBg)
 	addStyle                = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
 	selectedAddStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Background(selectedBg)
 	rangeAddStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Background(rangeBg)
@@ -1069,6 +1055,17 @@ func overlay(base, modal string, width, height int) string {
 		baseLines[row] = padRight(strings.Repeat(" ", left)+padRight(line, modalW), width)
 	}
 	return strings.Join(baseLines, "\n")
+}
+
+func padBlockHeight(s string, height, width int) string {
+	lines := strings.Split(s, "\n")
+	for len(lines) < height {
+		lines = append(lines, strings.Repeat(" ", max(0, width)))
+	}
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func padRight(s string, width int) string {

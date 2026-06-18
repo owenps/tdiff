@@ -13,11 +13,11 @@ import (
 
 func TestDiffPaneRendersUnifiedAnnotationAndRange(t *testing.T) {
 	m := diffPaneTestModel(false)
-	m.cursor.MoveLine(1, 10)
-	if !m.cursor.StartRange() {
+	m.session.MoveLine(1, 10)
+	if !m.session.StartRange() {
 		t.Fatal("expected range to start")
 	}
-	m.cursor.MoveLine(1, 10)
+	m.session.MoveLine(1, 10)
 
 	out := xansi.Strip(m.renderDiff(4))
 	for _, want := range []string{"@@ -1 +1 @@", "╭", "- old", "╰", "+ new"} {
@@ -45,6 +45,17 @@ func TestDiffPaneRendersSplitView(t *testing.T) {
 	}
 }
 
+func TestReviewViewPadsToTerminalHeight(t *testing.T) {
+	m := diffPaneTestModel(false)
+	m.width = 80
+	m.height = 20
+
+	lines := strings.Split(m.View(), "\n")
+	if len(lines) != m.height {
+		t.Fatalf("view lines=%d, want %d", len(lines), m.height)
+	}
+}
+
 func TestDiffPaneKeepsSyntaxHighlightingOnAddDeleteLines(t *testing.T) {
 	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@", Lines: []diff.Line{
 		{Kind: diff.Delete, OldNo: 1, Text: "-func old() {}"},
@@ -54,7 +65,7 @@ func TestDiffPaneKeepsSyntaxHighlightingOnAddDeleteLines(t *testing.T) {
 	m := Model{
 		store:       store,
 		annotations: annotations.NewWorkflow(store),
-		cursor:      review.NewCursor([]diff.File{file}),
+		session:     review.NewSession([]diff.File{file}),
 		width:       120,
 		syntax:      true,
 		syntaxCache: make(map[string]string),
@@ -75,7 +86,7 @@ func diffPaneTestModel(split bool) Model {
 	return Model{
 		store:       store,
 		annotations: annotations.NewWorkflow(store),
-		cursor:      review.NewCursor([]diff.File{file}),
+		session:     review.NewSession([]diff.File{file}),
 		width:       80,
 		split:       split,
 		syntax:      false,

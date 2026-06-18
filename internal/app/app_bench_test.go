@@ -34,7 +34,7 @@ func benchModel(lines int) Model {
 	file := diff.File{NewPath: "big.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: diffLines}}}
 	return Model{
 		store:       &annotate.Store{},
-		cursor:      review.NewCursor([]diff.File{file}),
+		session:     review.NewSession([]diff.File{file}),
 		width:       120,
 		height:      40,
 		syntaxCache: make(map[string]string),

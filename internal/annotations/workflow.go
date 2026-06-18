@@ -6,6 +6,7 @@ import (
 
 	"github.com/owenps/tdiff/internal/annotate"
 	"github.com/owenps/tdiff/internal/diff"
+	"github.com/owenps/tdiff/internal/review"
 )
 
 type Store interface {
@@ -42,6 +43,24 @@ func (w Workflow) TargetForLine(dl DiffLine) (Target, error) {
 		return Target{}, fmt.Errorf("no line selected")
 	}
 	return Target{Side: side, LineStart: line, LineEnd: line, HunkHeader: dl.HunkHeader, Context: dl.Line.Text}, nil
+}
+
+func (w Workflow) TargetForDisplayLine(dl review.DisplayLine) (Target, error) {
+	if dl.Line == nil {
+		return Target{}, fmt.Errorf("no line selected")
+	}
+	return w.TargetForLine(DiffLine{Line: *dl.Line, HunkHeader: dl.HunkHeader})
+}
+
+func (w Workflow) TargetForDisplayRange(lines []review.DisplayLine) (Target, error) {
+	selected := make([]DiffLine, 0, len(lines))
+	for _, dl := range lines {
+		if dl.Line == nil {
+			continue
+		}
+		selected = append(selected, DiffLine{Line: *dl.Line, HunkHeader: dl.HunkHeader})
+	}
+	return w.TargetForRange(selected)
 }
 
 func (w Workflow) TargetForRange(lines []DiffLine) (Target, error) {

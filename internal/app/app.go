@@ -482,14 +482,31 @@ func (m Model) totalStats() diffStats {
 }
 
 func (m Model) statsView(s diffStats) string {
-	return fmt.Sprintf("%s %s", addStyle.Render(fmt.Sprintf("+%d", s.Added)), deleteStyle.Render(fmt.Sprintf("-%d", s.Deleted)))
+	var parts []string
+	if s.Added > 0 {
+		parts = append(parts, addStyle.Render(fmt.Sprintf("+%d", s.Added)))
+	}
+	if s.Deleted > 0 {
+		parts = append(parts, deleteStyle.Render(fmt.Sprintf("-%d", s.Deleted)))
+	}
+	return strings.Join(parts, " ")
 }
 
 func (m Model) sidebarStatsView(s diffStats) string {
-	return fmt.Sprintf("%s %s", addStyle.Render(sidebarStat("+", s.Added)), deleteStyle.Render(sidebarStat("-", s.Deleted)))
+	var parts []string
+	if add := sidebarStat("+", s.Added); add != "" {
+		parts = append(parts, addStyle.Render(add))
+	}
+	if del := sidebarStat("-", s.Deleted); del != "" {
+		parts = append(parts, deleteStyle.Render(del))
+	}
+	return strings.Join(parts, " ")
 }
 
 func sidebarStat(prefix string, count int) string {
+	if count == 0 {
+		return ""
+	}
 	if count >= 1000 {
 		return fmt.Sprintf("%s%dk", prefix, count/1000)
 	}
@@ -510,9 +527,20 @@ func (m Model) totalAnnotationCount() int {
 
 func (m Model) annotationsView(count int) string {
 	if count == 0 {
-		return dimStyle.Render("  ")
+		return ""
 	}
 	return annotationStyle.Render(fmt.Sprintf("●%d", count))
+}
+
+func sidebarHeader(stats, annotations string) string {
+	parts := []string{titleStyle.Render("tdiff")}
+	if stats != "" {
+		parts = append(parts, stats)
+	}
+	if annotations != "" {
+		parts = append(parts, annotations)
+	}
+	return strings.Join(parts, " ")
 }
 
 func selectedSidebarLine(prefix, viewed string, nameW int, path, added, deleted string, annotationCount, annotationW int) string {
@@ -550,7 +578,7 @@ func sidebarAnnotationView(count, width int, selected bool) string {
 }
 
 func sidebarColumnWidths(files []diff.File, annotationCount func(string) int) (int, int, int, int) {
-	addW, delW, annotationW := 2, 2, 2
+	addW, delW, annotationW := 0, 0, 2
 	for _, f := range files {
 		stats := fileStats(f)
 		addW = max(addW, xansi.StringWidth(sidebarStat("+", stats.Added)))
@@ -698,7 +726,7 @@ func (m Model) renderSidebar(height int) string {
 	}
 	fileHeight := height - previewHeight
 	var rows []string
-	rows = append(rows, titleStyle.Render("tdiff")+" "+m.sidebarStatsView(m.totalStats())+" "+m.annotationsView(m.totalAnnotationCount()))
+	rows = append(rows, sidebarHeader(m.sidebarStatsView(m.totalStats()), m.annotationsView(m.totalAnnotationCount())))
 	start := clamp(fileIdx-fileHeight/2, 0, max(0, len(files)-fileHeight+1))
 	end := min(len(files), start+fileHeight-1)
 	for i := start; i < end; i++ {
@@ -785,9 +813,12 @@ func (m Model) renderDiffHeader(width int) string {
 	path := compactPath(m.currentPath(), max(12, width-18))
 	stats := m.statsView(fileStats(m.cursor.Files()[m.cursor.FileIndex()]))
 	if annotations := m.annotationCount(m.currentPath()); annotations > 0 {
-		stats += " " + annotationStyle.Render(fmt.Sprintf("●%d", annotations))
+		stats = strings.TrimSpace(stats + " " + annotationStyle.Render(fmt.Sprintf("●%d", annotations)))
 	}
-	line := titleStyle.Render(path) + "  " + stats
+	line := titleStyle.Render(path)
+	if stats != "" {
+		line += "  " + stats
+	}
 	return padRight(truncate(line, width), width)
 }
 
@@ -799,9 +830,12 @@ func (m Model) renderStatus() string {
 	files := m.cursor.Files()
 	stats := m.statsView(m.totalStats())
 	if annotations := m.totalAnnotationCount(); annotations > 0 {
-		stats += " " + annotationStyle.Render(fmt.Sprintf("●%d", annotations))
+		stats = strings.TrimSpace(stats + " " + annotationStyle.Render(fmt.Sprintf("●%d", annotations)))
 	}
-	parts := []string{dimStyle.Render(mode), dimStyle.Render(fmt.Sprintf("%d/%d", min(m.cursor.FileIndex()+1, len(files)), len(files))), stats}
+	parts := []string{dimStyle.Render(mode), dimStyle.Render(fmt.Sprintf("%d/%d", min(m.cursor.FileIndex()+1, len(files)), len(files)))}
+	if stats != "" {
+		parts = append(parts, stats)
+	}
 	if m.split {
 		parts = append(parts, dimStyle.Render("split"))
 	}
@@ -960,9 +994,10 @@ var (
 	selectedDimStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Background(selectedBg)
 	successStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
 	errorStyle              = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	hunkStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("99"))
-	selectedHunkStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Background(selectedBg)
-	rangeHunkStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("99")).Background(rangeBg)
+	hunkColor              = lipgloss.Color("99")
+	hunkStyle              = lipgloss.NewStyle().Foreground(hunkColor)
+	selectedHunkStyle      = lipgloss.NewStyle().Foreground(hunkColor).Background(selectedBg)
+	rangeHunkStyle         = lipgloss.NewStyle().Foreground(hunkColor).Background(rangeBg)
 	addStyle                = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
 	selectedAddStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Background(selectedBg)
 	rangeAddStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Background(rangeBg)

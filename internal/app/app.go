@@ -1,16 +1,12 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/alecthomas/chroma/v2/formatters"
-	"github.com/alecthomas/chroma/v2/lexers"
-	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
@@ -363,18 +359,13 @@ func (m *Model) reload(ctx context.Context) error {
 }
 
 func (m *Model) applyFilters() {
-	filtered := make([]diff.File, 0, len(m.allFiles))
-	for _, f := range m.allFiles {
-		path := f.Path()
-		if m.hideViewed && m.store.IsViewed(path, m.diffHash) {
-			continue
-		}
-		if m.notesOnly && m.noteCount(path) == 0 {
-			continue
-		}
-		filtered = append(filtered, f)
-	}
-	m.cursor.SetFiles(filtered)
+	m.cursor.SetFilteredFiles(m.allFiles, review.FileFilter{
+		HideViewed: m.hideViewed,
+		NotesOnly:  m.notesOnly,
+		DiffHash:   m.diffHash,
+		IsViewed:   m.store.IsViewed,
+		NoteCount:  m.noteCount,
+	})
 }
 
 type displayLine = review.DisplayLine
@@ -388,11 +379,7 @@ func (m Model) selectedLine() displayLine {
 }
 
 func (m Model) selectedAnnotation() (notes.Note, bool) {
-	dl := m.selectedLine()
-	if dl.Line == nil {
-		return notes.Note{}, false
-	}
-	return m.annotations.AnnotationAt(m.currentPath(), *dl.Line)
+	return m.cursor.SelectedAnnotation(m.annotations.AnnotationAt)
 }
 
 func (m *Model) startEditAnnotation(note notes.Note) {
@@ -633,35 +620,12 @@ func (m *Model) prevAnnotation() {
 }
 
 func (m *Model) jumpAnnotation(delta int) {
-	positions := m.annotationPositions()
-	if len(positions) == 0 {
+	idx, total, ok := m.cursor.JumpAnnotation(delta, m.bodyHeight(), m.store.NotesFor)
+	if !ok {
 		m.status = "no annotations"
 		return
 	}
-	curFile, curLine := m.cursor.FileIndex(), m.cursor.LineIndex()
-	idx := -1
-	if delta > 0 {
-		idx = 0
-		for i, p := range positions {
-			if p.fileIdx > curFile || (p.fileIdx == curFile && p.lineIdx > curLine) {
-				idx = i
-				break
-			}
-		}
-	} else {
-		idx = len(positions) - 1
-		for i := len(positions) - 1; i >= 0; i-- {
-			p := positions[i]
-			if p.fileIdx < curFile || (p.fileIdx == curFile && p.lineIdx < curLine) {
-				idx = i
-				break
-			}
-		}
-	}
-	p := positions[idx]
-	if m.cursor.JumpToIndex(p.fileIdx, p.lineIdx, m.bodyHeight()) {
-		m.status = fmt.Sprintf("annotation %d/%d", idx+1, len(positions))
-	}
+	m.status = fmt.Sprintf("annotation %d/%d", idx, total)
 }
 
 func (m *Model) jumpToFileLine(line int) bool {
@@ -684,9 +648,7 @@ func (m Model) footerHeight() int {
 }
 
 func (m *Model) advanceToNextUnviewed() bool {
-	return m.cursor.AdvanceToNextFile(func(f diff.File) bool {
-		return !m.store.IsViewed(f.Path(), m.diffHash)
-	})
+	return m.cursor.AdvanceToNextUnviewed(m.diffHash, m.store.IsViewed)
 }
 
 func (m Model) renderSidebar(height int) string {
@@ -734,49 +696,8 @@ func (m Model) renderSidebar(height int) string {
 	return style.Render(strings.Join(rows, "\n"))
 }
 
-type annotationPosition struct {
-	fileIdx int
-	lineIdx int
-	note    notes.Note
-}
-
-func (m Model) annotationPositions() []annotationPosition {
-	files := m.cursor.Files()
-	var out []annotationPosition
-	for fileIdx, f := range files {
-		path := f.Path()
-		lines := displayLinesForFile(f)
-		for _, note := range m.store.NotesFor(path) {
-			for lineIdx, dl := range lines {
-				if dl.Line != nil && noteMatchesLine(note, *dl.Line) {
-					out = append(out, annotationPosition{fileIdx: fileIdx, lineIdx: lineIdx, note: note})
-					break
-				}
-			}
-		}
-	}
-	return out
-}
-
-func displayLinesForFile(f diff.File) []displayLine {
-	var out []displayLine
-	for _, h := range f.Hunks {
-		header := h.Header
-		out = append(out, displayLine{Text: header, HunkHeader: header})
-		for i := range h.Lines {
-			line := h.Lines[i]
-			out = append(out, displayLine{Line: &line, Text: line.Text, HunkHeader: header})
-		}
-	}
-	return out
-}
-
-func noteMatchesLine(note notes.Note, line diff.Line) bool {
-	lineNo := line.NewNo
-	if note.Side == notes.SideOld {
-		lineNo = line.OldNo
-	}
-	return lineNo >= note.LineStart && lineNo <= note.LineEnd
+func (m Model) annotationPositions() []review.AnnotationPosition {
+	return m.cursor.AnnotationPositions(m.store.NotesFor)
 }
 
 func (m Model) renderAnnotationPreview(maxRows int) []string {
@@ -791,7 +712,7 @@ func (m Model) renderAnnotationPreview(maxRows int) []string {
 	start := 0
 	if hasSelected {
 		for i, p := range positions {
-			if p.note.ID == selected.ID {
+			if p.Note.ID == selected.ID {
 				start = clamp(i-maxItems/2, 0, max(0, len(positions)-maxItems))
 				break
 			}
@@ -799,12 +720,12 @@ func (m Model) renderAnnotationPreview(maxRows int) []string {
 	}
 	for i := start; i < len(positions) && remaining > 0; i++ {
 		p := positions[i]
-		loc := fmt.Sprintf("● %s:%d", compactPath(p.note.Path, sidebarWidth-8), p.note.LineStart)
-		if p.note.LineEnd != 0 && p.note.LineEnd != p.note.LineStart {
-			loc = fmt.Sprintf("● %s:%d-%d", compactPath(p.note.Path, sidebarWidth-10), p.note.LineStart, p.note.LineEnd)
+		loc := fmt.Sprintf("● %s:%d", compactPath(p.Note.Path, sidebarWidth-8), p.Note.LineStart)
+		if p.Note.LineEnd != 0 && p.Note.LineEnd != p.Note.LineStart {
+			loc = fmt.Sprintf("● %s:%d-%d", compactPath(p.Note.Path, sidebarWidth-10), p.Note.LineStart, p.Note.LineEnd)
 		}
-		body := "  " + truncate(strings.ReplaceAll(p.note.Body, "\n", " "), sidebarWidth-2)
-		isSelected := hasSelected && selected.ID == p.note.ID
+		body := "  " + truncate(strings.ReplaceAll(p.Note.Body, "\n", " "), sidebarWidth-2)
+		isSelected := hasSelected && selected.ID == p.Note.ID
 		if isSelected {
 			rows = append(rows, padRightStyled(selectedAnnotationStyle.Render(truncate(loc, sidebarWidth)), sidebarWidth, selectedStyle))
 		} else {
@@ -834,338 +755,6 @@ func (m Model) renderDiffHeader(width int) string {
 	return padRight(truncate(line, width), width)
 }
 
-func (m Model) renderDiff(height int) string {
-	width := max(40, m.width-sidebarWidth-2)
-	if m.hideSidebar {
-		width = max(40, m.width)
-	}
-	style := lipgloss.NewStyle().Width(width)
-	lineCount := m.cursor.CurrentLineCount()
-	lineIdx := m.cursor.LineIndex()
-	start := clamp(m.cursor.DiffOffset(), 0, max(0, lineCount-height))
-	end := min(lineCount, start+height)
-	lines := m.cursor.CurrentLinesRange(start, end)
-	syntaxOK := m.syntaxAllowed(lineCount)
-
-	notesForFile := m.store.NotesFor(m.currentPath())
-	var rows []string
-	for offset, dl := range lines {
-		i := start + offset
-		selected := i == lineIdx
-		inRange := m.inActiveRange(i)
-		rangeGlyph := m.rangeGlyph(i)
-		line := m.formatLine(dl, notesForFile, width, selected, inRange, rangeGlyph, syntaxOK)
-		if !selected {
-			if inRange {
-				line = padRightStyled(line, width, rangeStyle)
-			} else {
-				line = padRight(line, width)
-			}
-		}
-		rows = append(rows, line)
-	}
-	return style.Render(strings.Join(rows, "\n"))
-}
-
-func (m Model) syntaxAllowed(lineCount int) bool {
-	return m.syntax && lineCount <= syntaxMaxFileLines && lexers.Match(m.currentPath()) != nil
-}
-
-func (m Model) formatLine(dl displayLine, fileNotes []notes.Note, width int, selected, inRange bool, rangeGlyph string, syntaxOK bool) string {
-	if dl.Line == nil {
-		text := truncate(rangePrefix(rangeGlyph)+dl.Text, width)
-		if selected {
-			return padRightStyled(selectedHunkStyle.Render(text), width, selectedStyle)
-		}
-		if inRange {
-			return rangeHunkStyle.Render(text)
-		}
-		return hunkStyle.Render(text)
-	}
-	l := *dl.Line
-	marker := " "
-	for _, n := range fileNotes {
-		if noteMarker := m.annotations.MarkerFor(n, l); noteMarker != "" {
-			marker = noteMarker
-			break
-		}
-	}
-	if m.split {
-		oldText, newText := "", ""
-		oldNo, newNo := "", ""
-		if l.OldNo > 0 {
-			oldNo = fmt.Sprintf("%2d", l.OldNo)
-		}
-		if l.NewNo > 0 {
-			newNo = fmt.Sprintf("%2d", l.NewNo)
-		}
-		body := strings.TrimPrefix(strings.TrimPrefix(l.Text, "+"), "-")
-		switch l.Kind {
-		case diff.Delete:
-			oldText = body
-		case diff.Add:
-			newText = body
-		default:
-			oldText = body
-			newText = body
-		}
-		fixed := 10
-		leftW := max(1, (width-fixed)/2)
-		rightW := max(1, width-fixed-leftW)
-		prefix := rangeCell(rangeGlyph, selected, inRange) + gutterView(" ", selected, inRange) + annotationMarker(marker, selected, inRange)
-		oldBody := fmt.Sprintf("%-*s", leftW, truncate(oldText, leftW))
-		newBody := fmt.Sprintf("%-*s", rightW, truncate(newText, rightW))
-		oldKind, newKind := diff.Context, diff.Context
-		if l.Kind == diff.Delete {
-			oldKind = diff.Delete
-		}
-		if l.Kind == diff.Add {
-			newKind = diff.Add
-		}
-		rest := m.lineNoView(oldNo, oldKind, selected, inRange) + gutterView(" │ ", selected, inRange) + m.splitTextView(l.Kind, notes.SideOld, oldBody, selected, inRange, syntaxOK) + gutterView(" │ ", selected, inRange) + m.lineNoView(newNo, newKind, selected, inRange) + gutterView(" ", selected, inRange) + m.splitTextView(l.Kind, notes.SideNew, newBody, selected, inRange, syntaxOK)
-		if selected {
-			line := rangeCell(rangeGlyph, true, inRange) + selectedStyle.Render(" ") + annotationMarker(marker, true, inRange) + rest
-			return padRightStyled(truncate(line, width), width, selectedStyle)
-		}
-		return truncate(prefix+rest, width)
-	}
-	oldNo, newNo := "", ""
-	if l.OldNo > 0 {
-		oldNo = fmt.Sprintf("%2d", l.OldNo)
-	}
-	if l.NewNo > 0 {
-		newNo = fmt.Sprintf("%2d", l.NewNo)
-	}
-	prefix := rangeCell(rangeGlyph, selected, inRange) + gutterView(" ", selected, inRange) + annotationMarker(marker, selected, inRange)
-	rest := m.lineNoView(oldNo, l.Kind, selected, inRange) + gutterView(" ", selected, inRange) + m.lineNoView(newNo, l.Kind, selected, inRange) + gutterView(" ", selected, inRange) + m.diffTextView(l.Kind, l.Text, selected, inRange, syntaxOK)
-	if selected {
-		line := rangeCell(rangeGlyph, true, inRange) + selectedStyle.Render(" ") + annotationMarker(marker, true, inRange) + rest
-		return padRightStyled(truncate(line, width), width, selectedStyle)
-	}
-	return truncate(prefix+rest, width)
-}
-
-func (m Model) lineNoView(s string, kind diff.Kind, selected, inRange bool) string {
-	if selected {
-		return selectedColorLine(kind, s)
-	}
-	if inRange {
-		return rangeColorLine(kind, s)
-	}
-	return colorLine(kind, s)
-}
-
-func gutterView(s string, selected, inRange bool) string {
-	if selected {
-		return selectedDimStyle.Render(s)
-	}
-	if inRange {
-		return rangeDimStyle.Render(s)
-	}
-	return dimStyle.Render(s)
-}
-
-func (m Model) diffTextView(kind diff.Kind, s string, selected, inRange, syntaxOK bool) string {
-	if !syntaxOK || kind == diff.Meta {
-		return diffTextColor(kind, s, selected, inRange)
-	}
-	marker, body := diffMarkerBody(s)
-	if selected {
-		prefix := ""
-		if marker != "" {
-			prefix = selectedColorLine(kind, marker)
-		}
-		return prefix + withANSIBackground(m.syntaxView(body), selectedBg)
-	}
-	if inRange {
-		prefix := ""
-		if marker != "" {
-			prefix = rangeColorLine(kind, marker)
-		}
-		return prefix + withANSIBackground(m.syntaxView(body), rangeBg)
-	}
-	if marker != "" {
-		return colorLine(kind, marker) + m.syntaxView(body)
-	}
-	return m.syntaxView(body)
-}
-
-func (m Model) splitTextView(kind diff.Kind, side notes.Side, s string, selected, inRange, syntaxOK bool) string {
-	if kind == diff.Delete && side == notes.SideOld {
-		return m.syntaxBodyView(kind, s, selected, inRange, syntaxOK)
-	}
-	if kind == diff.Add && side == notes.SideNew {
-		return m.syntaxBodyView(kind, s, selected, inRange, syntaxOK)
-	}
-	if selected {
-		if syntaxOK {
-			return withANSIBackground(m.syntaxView(s), selectedBg)
-		}
-		return selectedStyle.Render(s)
-	}
-	if inRange {
-		if syntaxOK {
-			return withANSIBackground(m.syntaxView(s), rangeBg)
-		}
-		return rangeStyle.Render(s)
-	}
-	if syntaxOK {
-		return m.syntaxView(s)
-	}
-	return s
-}
-
-func (m Model) syntaxBodyView(kind diff.Kind, s string, selected, inRange, syntaxOK bool) string {
-	if !syntaxOK {
-		return diffTextColor(kind, s, selected, inRange)
-	}
-	if selected {
-		return withANSIBackground(m.syntaxView(s), selectedBg)
-	}
-	if inRange {
-		return withANSIBackground(m.syntaxView(s), rangeBg)
-	}
-	return m.syntaxView(s)
-}
-
-func withANSIBackground(s string, color lipgloss.Color) string {
-	if s == "" {
-		return s
-	}
-	bg := "\x1b[48;5;" + string(color) + "m"
-	return bg + strings.ReplaceAll(s, "\x1b[0m", "\x1b[0m"+bg) + "\x1b[0m"
-}
-
-func diffTextColor(kind diff.Kind, s string, selected, inRange bool) string {
-	if selected {
-		return selectedColorLine(kind, s)
-	}
-	if inRange {
-		return rangeColorLine(kind, s)
-	}
-	return colorLine(kind, s)
-}
-
-func diffMarkerBody(s string) (string, string) {
-	if s == "" {
-		return "", ""
-	}
-	switch s[0] {
-	case '+', '-', ' ':
-		return s[:1], s[1:]
-	default:
-		return "", s
-	}
-}
-
-func (m Model) syntaxView(s string) string {
-	if strings.TrimSpace(s) == "" || xansi.StringWidth(s) > syntaxMaxLineWidth {
-		return s
-	}
-	path := m.currentPath()
-	lexer := lexers.Match(path)
-	if lexer == nil {
-		return s
-	}
-	body := strings.TrimRight(s, " \t")
-	trail := s[len(body):]
-	key := path + "\x00" + body
-	if m.syntaxCache != nil {
-		if cached, ok := m.syntaxCache[key]; ok {
-			return cached + trail
-		}
-		if len(m.syntaxCache) >= syntaxCacheMaxEntries {
-			clear(m.syntaxCache)
-		}
-	}
-	formatter := formatters.Get("terminal256")
-	style := styles.Get("github-dark")
-	if formatter == nil || style == nil {
-		return s
-	}
-	iterator, err := lexer.Tokenise(nil, body)
-	if err != nil {
-		return s
-	}
-	var out bytes.Buffer
-	if err := formatter.Format(&out, style, iterator); err != nil {
-		return s
-	}
-	highlighted := strings.TrimSuffix(out.String(), "\n")
-	if m.syntaxCache != nil {
-		m.syntaxCache[key] = highlighted
-	}
-	return highlighted + trail
-}
-
-func (m Model) rangeGlyph(idx int) string {
-	if !m.cursor.RangeActive() || !m.cursor.InActiveRange(idx) {
-		return " "
-	}
-	start, end := m.cursor.RangeIndexes()
-	if start == end {
-		return "│"
-	}
-	if idx == start {
-		return "╭"
-	}
-	if idx == end {
-		return "╰"
-	}
-	return "│"
-}
-
-func rangeCell(glyph string, selected, inRange bool) string {
-	if glyph == "" {
-		glyph = " "
-	}
-	if strings.TrimSpace(glyph) == "" {
-		if selected {
-			return selectedStyle.Render(" ")
-		}
-		if inRange {
-			return rangeStyle.Render(" ")
-		}
-		return " "
-	}
-	if selected {
-		return selectedAnnotationStyle.Render(glyph)
-	}
-	if inRange {
-		return rangeAnnotationStyle.Render(glyph)
-	}
-	return annotationStyle.Render(glyph)
-}
-
-func rangePrefix(glyph string) string {
-	if strings.TrimSpace(glyph) == "" {
-		return ""
-	}
-	return glyph + " "
-}
-
-func annotationMarker(marker string, selected, inRange bool) string {
-	if strings.TrimSpace(marker) == "" {
-		if selected {
-			return selectedStyle.Render(marker)
-		}
-		if inRange {
-			return rangeStyle.Render(marker)
-		}
-		return marker
-	}
-	if selected {
-		return selectedAnnotationStyle.Render(marker)
-	}
-	if inRange {
-		return rangeAnnotationStyle.Render(marker)
-	}
-	return annotationStyle.Render(marker)
-}
-
-func (m Model) inActiveRange(idx int) bool {
-	return m.cursor.InActiveRange(idx)
-}
 func (m Model) renderStatus() string {
 	mode := string(m.cfg.Mode)
 	if mode == "" {

@@ -1,6 +1,9 @@
 package review
 
-import "github.com/owenps/tdiff/internal/diff"
+import (
+	"github.com/owenps/tdiff/internal/diff"
+	"github.com/owenps/tdiff/internal/notes"
+)
 
 type DisplayLine struct {
 	Line       *diff.Line
@@ -29,6 +32,33 @@ func (c *Cursor) SetFiles(files []diff.File) {
 	c.lineIdx = 0
 	c.diffOffset = 0
 	c.rangeActive = false
+}
+
+type FileFilter struct {
+	HideViewed bool
+	NotesOnly  bool
+	DiffHash   string
+	IsViewed   func(path, diffHash string) bool
+	NoteCount  func(path string) int
+}
+
+func (c *Cursor) SetFilteredFiles(files []diff.File, filter FileFilter) {
+	c.SetFiles(FilterFiles(files, filter))
+}
+
+func FilterFiles(files []diff.File, filter FileFilter) []diff.File {
+	filtered := make([]diff.File, 0, len(files))
+	for _, f := range files {
+		path := f.Path()
+		if filter.HideViewed && filter.IsViewed != nil && filter.IsViewed(path, filter.DiffHash) {
+			continue
+		}
+		if filter.NotesOnly && filter.NoteCount != nil && filter.NoteCount(path) == 0 {
+			continue
+		}
+		filtered = append(filtered, f)
+	}
+	return filtered
 }
 
 func (c Cursor) Files() []diff.File { return c.files }
@@ -228,6 +258,95 @@ func (c *Cursor) AdvanceToNextFile(matches func(diff.File) bool) bool {
 		}
 	}
 	return false
+}
+
+func (c *Cursor) AdvanceToNextUnviewed(diffHash string, isViewed func(path, diffHash string) bool) bool {
+	return c.AdvanceToNextFile(func(f diff.File) bool {
+		return isViewed == nil || !isViewed(f.Path(), diffHash)
+	})
+}
+
+type AnnotationPosition struct {
+	FileIdx int
+	LineIdx int
+	Note    notes.Note
+}
+
+func (c Cursor) AnnotationPositions(notesForPath func(string) []notes.Note) []AnnotationPosition {
+	var out []AnnotationPosition
+	for fileIdx, f := range c.files {
+		path := f.Path()
+		lines := DisplayLinesForFile(f)
+		for _, note := range notesForPath(path) {
+			for lineIdx, dl := range lines {
+				if dl.Line != nil && NoteMatchesLine(note, *dl.Line) {
+					out = append(out, AnnotationPosition{FileIdx: fileIdx, LineIdx: lineIdx, Note: note})
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
+func (c *Cursor) JumpAnnotation(delta, height int, notesForPath func(string) []notes.Note) (int, int, bool) {
+	positions := c.AnnotationPositions(notesForPath)
+	if len(positions) == 0 {
+		return 0, 0, false
+	}
+	idx := -1
+	if delta > 0 {
+		idx = 0
+		for i, p := range positions {
+			if p.FileIdx > c.fileIdx || (p.FileIdx == c.fileIdx && p.LineIdx > c.lineIdx) {
+				idx = i
+				break
+			}
+		}
+	} else {
+		idx = len(positions) - 1
+		for i := len(positions) - 1; i >= 0; i-- {
+			p := positions[i]
+			if p.FileIdx < c.fileIdx || (p.FileIdx == c.fileIdx && p.LineIdx < c.lineIdx) {
+				idx = i
+				break
+			}
+		}
+	}
+	p := positions[idx]
+	if !c.JumpToIndex(p.FileIdx, p.LineIdx, height) {
+		return 0, len(positions), false
+	}
+	return idx + 1, len(positions), true
+}
+
+func (c Cursor) SelectedAnnotation(annotationAt func(path string, line diff.Line) (notes.Note, bool)) (notes.Note, bool) {
+	dl := c.SelectedLine()
+	if dl.Line == nil || annotationAt == nil {
+		return notes.Note{}, false
+	}
+	return annotationAt(c.CurrentPath(), *dl.Line)
+}
+
+func DisplayLinesForFile(f diff.File) []DisplayLine {
+	var out []DisplayLine
+	for _, h := range f.Hunks {
+		header := h.Header
+		out = append(out, DisplayLine{Text: header, HunkHeader: header})
+		for i := range h.Lines {
+			line := h.Lines[i]
+			out = append(out, DisplayLine{Line: &line, Text: line.Text, HunkHeader: header})
+		}
+	}
+	return out
+}
+
+func NoteMatchesLine(note notes.Note, line diff.Line) bool {
+	lineNo := line.NewNo
+	if note.Side == notes.SideOld {
+		lineNo = line.OldNo
+	}
+	return lineNo >= note.LineStart && lineNo <= note.LineEnd
 }
 
 func clamp(v, low, high int) int { return min(max(v, low), high) }

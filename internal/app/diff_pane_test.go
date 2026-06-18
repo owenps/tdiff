@@ -5,9 +5,9 @@ import (
 	"testing"
 
 	xansi "github.com/charmbracelet/x/ansi"
+	"github.com/owenps/tdiff/internal/annotate"
 	"github.com/owenps/tdiff/internal/annotations"
 	"github.com/owenps/tdiff/internal/diff"
-	"github.com/owenps/tdiff/internal/notes"
 	"github.com/owenps/tdiff/internal/review"
 )
 
@@ -20,10 +20,18 @@ func TestDiffPaneRendersUnifiedAnnotationAndRange(t *testing.T) {
 	m.cursor.MoveLine(1, 10)
 
 	out := xansi.Strip(m.renderDiff(4))
-	for _, want := range []string{"@@ -1 +1 @@", "╭", "●", "- old", "╰", "+ new"} {
+	for _, want := range []string{"@@ -1 +1 @@", "╭", "- old", "╰", "+ new"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("rendered diff missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestDiffPaneRendersAnnotationStartInRail(t *testing.T) {
+	m := diffPaneTestModel(false)
+	out := xansi.Strip(m.renderDiff(4))
+	if !strings.Contains(out, "●") {
+		t.Fatalf("rendered diff missing annotation start:\n%s", out)
 	}
 }
 
@@ -42,7 +50,7 @@ func TestDiffPaneKeepsSyntaxHighlightingOnAddDeleteLines(t *testing.T) {
 		{Kind: diff.Delete, OldNo: 1, Text: "-func old() {}"},
 		{Kind: diff.Add, NewNo: 1, Text: "+func main() {}"},
 	}}}}
-	store := &notes.Store{}
+	store := &annotate.Store{}
 	m := Model{
 		store:       store,
 		annotations: annotations.NewWorkflow(store),
@@ -63,7 +71,7 @@ func diffPaneTestModel(split bool) Model {
 		{Kind: diff.Delete, OldNo: 1, Text: "-old"},
 		{Kind: diff.Add, NewNo: 1, Text: "+new"},
 	}}}}
-	store := &notes.Store{Notes: []notes.Note{{ID: "n1", Path: "foo.go", Side: notes.SideOld, LineStart: 1, LineEnd: 1}}}
+	store := &annotate.Store{Annotations: []annotate.Annotation{{ID: "n1", Path: "foo.go", Side: annotate.SideOld, LineStart: 1, LineEnd: 1}}}
 	return Model{
 		store:       store,
 		annotations: annotations.NewWorkflow(store),

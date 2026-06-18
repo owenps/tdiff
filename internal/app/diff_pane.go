@@ -10,22 +10,22 @@ import (
 	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
+	"github.com/owenps/tdiff/internal/annotate"
 	"github.com/owenps/tdiff/internal/annotations"
 	"github.com/owenps/tdiff/internal/diff"
-	"github.com/owenps/tdiff/internal/notes"
 	"github.com/owenps/tdiff/internal/review"
 )
 
 type diffPane struct {
-	path        string
-	width       int
-	split       bool
-	syntax      bool
-	contextDim  bool
-	syntaxCache map[string]string
-	cursor      review.Cursor
-	annotations annotations.Workflow
-	notes       []notes.Note
+	path            string
+	width           int
+	split           bool
+	syntax          bool
+	contextDim      bool
+	syntaxCache     map[string]string
+	cursor          review.Cursor
+	workflow        annotations.Workflow
+	fileAnnotations []annotate.Annotation
 }
 
 func (m Model) renderDiff(height int) string {
@@ -38,20 +38,20 @@ func (m Model) renderDiff(height int) string {
 
 func (m Model) diffPane(width int) diffPane {
 	path := m.currentPath()
-	var fileNotes []notes.Note
+	var fileAnnotations []annotate.Annotation
 	if m.store != nil {
-		fileNotes = m.store.NotesFor(path)
+		fileAnnotations = m.store.AnnotationsFor(path)
 	}
 	return diffPane{
-		path:        path,
-		width:       width,
-		split:       m.split,
-		syntax:      m.syntax,
-		contextDim:  m.contextDim,
-		syntaxCache: m.syntaxCache,
-		cursor:      m.cursor,
-		annotations: m.annotations,
-		notes:       fileNotes,
+		path:            path,
+		width:           width,
+		split:           m.split,
+		syntax:          m.syntax,
+		contextDim:      m.contextDim,
+		syntaxCache:     m.syntaxCache,
+		cursor:          m.cursor,
+		workflow:        m.annotations,
+		fileAnnotations: fileAnnotations,
 	}
 }
 
@@ -178,7 +178,7 @@ func (p diffPane) syntaxAllowed(lineCount int) bool {
 
 func (p diffPane) formatLine(dl displayLine, selected, inRange bool, rangeGlyph string, syntaxOK bool) string {
 	if dl.Line == nil {
-		text := truncate(rangePrefix(rangeGlyph)+dl.Text, p.width)
+		text := truncate(railPrefix(rangeGlyph)+dl.Text, p.width)
 		if selected {
 			return padRightStyled(selectedHunkStyle.Render(text), p.width, selectedStyle)
 		}
@@ -189,9 +189,9 @@ func (p diffPane) formatLine(dl displayLine, selected, inRange bool, rangeGlyph 
 	}
 	l := *dl.Line
 	marker := " "
-	for _, n := range p.notes {
-		if noteMarker := p.annotations.MarkerFor(n, l); noteMarker != "" {
-			marker = noteMarker
+	for _, n := range p.fileAnnotations {
+		if annotationMarker := p.workflow.MarkerFor(n, l); annotationMarker != "" {
+			marker = annotationMarker
 			break
 		}
 	}
@@ -220,26 +220,26 @@ func (p diffPane) formatSplitRow(row splitRow, syntaxOK bool) string {
 	}
 	rangeGlyph := p.rangeGlyph(glyphIdx)
 	marker := p.splitRowMarker(row)
-	prefix := rangeCell(rangeGlyph, selected, inRange) + gutterView(" ", selected, inRange) + annotationMarker(marker, selected, inRange)
-	fixed := 3 + lineNoWidth + 1 + 3 + lineNoWidth + 1
+	prefix := railCell(railGlyph(marker, rangeGlyph), selected, inRange) + gutterView(" ", selected, inRange)
+	fixed := 2 + lineNoWidth + 1 + 3 + lineNoWidth + 1
 	leftW := max(1, (p.width-fixed)/2)
 	rightW := max(1, p.width-fixed-leftW)
-	oldNo, oldKind := splitLineNoAndKind(row.old.Line, notes.SideOld)
-	newNo, newKind := splitLineNoAndKind(row.new.Line, notes.SideNew)
-	rest := p.lineNoView(oldNo, oldKind, selected, inRange) + gutterView(" ", selected, inRange) + p.splitCellText(row.old.Line, notes.SideOld, leftW, selected, inRange, syntaxOK) + gutterView(" │ ", selected, inRange) + p.lineNoView(newNo, newKind, selected, inRange) + gutterView(" ", selected, inRange) + p.splitCellText(row.new.Line, notes.SideNew, rightW, selected, inRange, syntaxOK)
+	oldNo, oldKind := splitLineNoAndKind(row.old.Line, annotate.SideOld)
+	newNo, newKind := splitLineNoAndKind(row.new.Line, annotate.SideNew)
+	rest := p.lineNoView(oldNo, oldKind, selected, inRange) + gutterView(" ", selected, inRange) + p.splitCellText(row.old.Line, annotate.SideOld, leftW, selected, inRange, syntaxOK) + gutterView(" │ ", selected, inRange) + p.lineNoView(newNo, newKind, selected, inRange) + gutterView(" ", selected, inRange) + p.splitCellText(row.new.Line, annotate.SideNew, rightW, selected, inRange, syntaxOK)
 	line := prefix + rest
 	if selected {
-		line = rangeCell(rangeGlyph, true, inRange) + selectedStyle.Render(" ") + annotationMarker(marker, true, inRange) + rest
+		line = railCell(railGlyph(marker, rangeGlyph), true, inRange) + selectedStyle.Render(" ") + rest
 		return padRightStyled(truncate(line, p.width), p.width, selectedStyle)
 	}
 	return truncate(line, p.width)
 }
 
-func splitLineNoAndKind(line *diff.Line, side notes.Side) (string, diff.Kind) {
+func splitLineNoAndKind(line *diff.Line, side annotate.Side) (string, diff.Kind) {
 	if line == nil {
 		return lineNoText(0), diff.Context
 	}
-	if side == notes.SideOld {
+	if side == annotate.SideOld {
 		kind := diff.Context
 		if line.Kind == diff.Delete {
 			kind = diff.Delete
@@ -253,15 +253,15 @@ func splitLineNoAndKind(line *diff.Line, side notes.Side) (string, diff.Kind) {
 	return lineNoText(line.NewNo), kind
 }
 
-func (p diffPane) splitCellText(line *diff.Line, side notes.Side, width int, selected, inRange, syntaxOK bool) string {
+func (p diffPane) splitCellText(line *diff.Line, side annotate.Side, width int, selected, inRange, syntaxOK bool) string {
 	if line == nil || width <= 0 {
 		return gutterView(strings.Repeat(" ", max(0, width)), selected, inRange)
 	}
 	kind := diff.Context
-	if side == notes.SideOld && line.Kind == diff.Delete {
+	if side == annotate.SideOld && line.Kind == diff.Delete {
 		kind = diff.Delete
 	}
-	if side == notes.SideNew && line.Kind == diff.Add {
+	if side == annotate.SideNew && line.Kind == diff.Add {
 		kind = diff.Add
 	}
 	marker, body := diffMarkerBody(line.Text)
@@ -285,8 +285,8 @@ func (p diffPane) splitRowMarker(row splitRow) string {
 		if line == nil {
 			continue
 		}
-		for _, n := range p.notes {
-			if marker := p.annotations.MarkerFor(n, *line); marker != "" {
+		for _, n := range p.fileAnnotations {
+			if marker := p.workflow.MarkerFor(n, *line); marker != "" {
 				return marker
 			}
 		}
@@ -298,10 +298,10 @@ func (p diffPane) formatUnifiedLine(l diff.Line, marker string, selected, inRang
 	oldNo := lineNoText(l.OldNo)
 	newNo := lineNoText(l.NewNo)
 	diffSign, body := diffMarkerBody(l.Text)
-	prefix := rangeCell(rangeGlyph, selected, inRange) + gutterView(" ", selected, inRange) + annotationMarker(marker, selected, inRange)
+	prefix := railCell(railGlyph(marker, rangeGlyph), selected, inRange) + gutterView(" ", selected, inRange)
 	rest := p.lineNoView(oldNo, l.Kind, selected, inRange) + gutterView(" ", selected, inRange) + p.lineNoView(newNo, l.Kind, selected, inRange) + gutterView(" ", selected, inRange) + diffSignView(diffSign, l.Kind, selected, inRange) + gutterView(" ", selected, inRange) + p.diffTextView(l.Kind, body, selected, inRange, syntaxOK)
 	if selected {
-		line := rangeCell(rangeGlyph, true, inRange) + selectedStyle.Render(" ") + annotationMarker(marker, true, inRange) + rest
+		line := railCell(railGlyph(marker, rangeGlyph), true, inRange) + selectedStyle.Render(" ") + rest
 		return padRightStyled(truncate(line, p.width), p.width, selectedStyle)
 	}
 	return truncate(prefix+rest, p.width)
@@ -357,11 +357,11 @@ func (p diffPane) diffTextView(kind diff.Kind, s string, selected, inRange, synt
 	return p.syntaxView(s)
 }
 
-func (p diffPane) splitTextView(kind diff.Kind, side notes.Side, s string, selected, inRange, syntaxOK bool) string {
-	if kind == diff.Delete && side == notes.SideOld {
+func (p diffPane) splitTextView(kind diff.Kind, side annotate.Side, s string, selected, inRange, syntaxOK bool) string {
+	if kind == diff.Delete && side == annotate.SideOld {
 		return p.syntaxBodyView(kind, s, selected, inRange, syntaxOK)
 	}
-	if kind == diff.Add && side == notes.SideNew {
+	if kind == diff.Add && side == annotate.SideNew {
 		return p.syntaxBodyView(kind, s, selected, inRange, syntaxOK)
 	}
 	if selected {
@@ -481,7 +481,7 @@ func (p diffPane) rangeGlyph(idx int) string {
 	}
 	start, end := p.cursor.RangeIndexes()
 	if start == end {
-		return "│"
+		return "╭"
 	}
 	if idx == start {
 		return "╭"
@@ -492,7 +492,14 @@ func (p diffPane) rangeGlyph(idx int) string {
 	return "│"
 }
 
-func rangeCell(glyph string, selected, inRange bool) string {
+func railGlyph(annotationMarker, rangeGlyph string) string {
+	if strings.TrimSpace(rangeGlyph) != "" {
+		return rangeGlyph
+	}
+	return annotationMarker
+}
+
+func railCell(glyph string, selected, inRange bool) string {
 	if glyph == "" {
 		glyph = " "
 	}
@@ -514,30 +521,11 @@ func rangeCell(glyph string, selected, inRange bool) string {
 	return annotationStyle.Render(glyph)
 }
 
-func rangePrefix(glyph string) string {
+func railPrefix(glyph string) string {
 	if strings.TrimSpace(glyph) == "" {
 		return ""
 	}
 	return glyph + " "
-}
-
-func annotationMarker(marker string, selected, inRange bool) string {
-	if strings.TrimSpace(marker) == "" {
-		if selected {
-			return selectedStyle.Render(marker)
-		}
-		if inRange {
-			return rangeStyle.Render(marker)
-		}
-		return marker
-	}
-	if selected {
-		return selectedAnnotationStyle.Render(marker)
-	}
-	if inRange {
-		return rangeAnnotationStyle.Render(marker)
-	}
-	return annotationStyle.Render(marker)
 }
 
 func (p diffPane) inActiveRange(idx int) bool {

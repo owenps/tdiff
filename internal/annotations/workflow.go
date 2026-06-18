@@ -4,15 +4,15 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/owenps/tdiff/internal/annotate"
 	"github.com/owenps/tdiff/internal/diff"
-	"github.com/owenps/tdiff/internal/notes"
 )
 
 type Store interface {
-	Add(notes.Note) error
+	Add(annotate.Annotation) error
 	UpdateBody(id, body string) error
 	Delete(id string) error
-	NotesFor(path string) []notes.Note
+	AnnotationsFor(path string) []annotate.Annotation
 }
 
 type Workflow struct {
@@ -20,7 +20,7 @@ type Workflow struct {
 }
 
 type Target struct {
-	Side       notes.Side
+	Side       annotate.Side
 	LineStart  int
 	LineEnd    int
 	HunkHeader string
@@ -72,33 +72,33 @@ func (w Workflow) TargetForRange(lines []DiffLine) (Target, error) {
 	return target, nil
 }
 
-func (w Workflow) AnnotationAt(path string, line diff.Line) (notes.Note, bool) {
+func (w Workflow) AnnotationAt(path string, line diff.Line) (annotate.Annotation, bool) {
 	side, lineNo, ok := lineTarget(line)
 	if !ok {
-		return notes.Note{}, false
+		return annotate.Annotation{}, false
 	}
-	for _, n := range w.store.NotesFor(path) {
+	for _, n := range w.store.AnnotationsFor(path) {
 		if n.Side == side && n.LineStart <= lineNo && lineNo <= n.LineEnd {
 			return n, true
 		}
 	}
-	return notes.Note{}, false
+	return annotate.Annotation{}, false
 }
 
-func (w Workflow) MarkerFor(note notes.Note, line diff.Line) string {
+func (w Workflow) MarkerFor(annotation annotate.Annotation, line diff.Line) string {
 	lineNo := 0
-	if note.Side == notes.SideNew {
+	if annotation.Side == annotate.SideNew {
 		lineNo = line.NewNo
 	} else {
 		lineNo = line.OldNo
 	}
-	if lineNo == 0 || lineNo < note.LineStart || lineNo > note.LineEnd {
+	if lineNo == 0 || lineNo < annotation.LineStart || lineNo > annotation.LineEnd {
 		return ""
 	}
-	if note.LineStart == note.LineEnd || lineNo == note.LineStart {
+	if annotation.LineStart == annotation.LineEnd || lineNo == annotation.LineStart {
 		return "●"
 	}
-	if lineNo == note.LineEnd {
+	if lineNo == annotation.LineEnd {
 		return "╰"
 	}
 	return "│"
@@ -115,7 +115,10 @@ func (w Workflow) Save(path, diffHash, editingID string, target Target, body str
 	if target.LineStart == 0 {
 		return fmt.Errorf("no annotation target")
 	}
-	return w.store.Add(notes.Note{
+	if w.overlapsExisting(path, target) {
+		return fmt.Errorf("annotation overlaps existing annotation")
+	}
+	return w.store.Add(annotate.Annotation{
 		Path:       path,
 		Side:       target.Side,
 		Line:       target.LineStart,
@@ -132,17 +135,47 @@ func (w Workflow) Delete(id string) error {
 	return w.store.Delete(id)
 }
 
-func lineTarget(l diff.Line) (notes.Side, int, bool) {
+func (w Workflow) overlapsExisting(path string, target Target) bool {
+	start := target.LineStart
+	end := target.LineEnd
+	if end == 0 {
+		end = start
+	}
+	for _, n := range w.store.AnnotationsFor(path) {
+		if n.Side != target.Side {
+			continue
+		}
+		annotationStart, annotationEnd := annotationRange(n)
+		if start <= annotationEnd && annotationStart <= end {
+			return true
+		}
+	}
+	return false
+}
+
+func annotationRange(n annotate.Annotation) (int, int) {
+	start := n.LineStart
+	if start == 0 {
+		start = n.Line
+	}
+	end := n.LineEnd
+	if end == 0 {
+		end = start
+	}
+	return start, end
+}
+
+func lineTarget(l diff.Line) (annotate.Side, int, bool) {
 	if l.Kind == diff.Delete {
-		return notes.SideOld, l.OldNo, l.OldNo > 0
+		return annotate.SideOld, l.OldNo, l.OldNo > 0
 	}
 	if l.NewNo > 0 {
-		return notes.SideNew, l.NewNo, true
+		return annotate.SideNew, l.NewNo, true
 	}
 	if l.OldNo > 0 {
-		return notes.SideOld, l.OldNo, true
+		return annotate.SideOld, l.OldNo, true
 	}
-	return notes.SideNew, 0, false
+	return annotate.SideNew, 0, false
 }
 
 func min(a, b int) int {

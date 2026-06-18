@@ -36,7 +36,7 @@ tdiff export
 - <kbd>n</kbd>/<kbd>p</kbd> move file
 - <kbd>v</kbd> toggle viewed; marking viewed jumps to next unviewed file
 - <kbd>u</kbd> hide/show viewed files
-- <kbd>m</kbd> show files with notes only
+- <kbd>m</kbd> show files with annotations only
 - <kbd>y</kbd> copy selected annotation
 - <kbd>Y</kbd> copy all annotations markdown
 - <kbd>w</kbd> toggle whitespace handling/reload diff
@@ -46,7 +46,7 @@ tdiff export
 - <kbd>x</kbd> toggle syntax highlighting
 - <kbd>c</kbd> toggle context dimming
 - <kbd>r</kbd> start/cancel line range
-- <kbd>a</kbd> add annotation on selected line/range; edits existing annotation on selected line
+- <kbd>a</kbd> annotate selected line/range; edits existing annotation on selected line
 - <kbd>e</kbd> edit annotation on selected line/range
 - <kbd>d</kbd> delete annotation on selected line/range
 - <kbd>⌥</kbd>+<kbd>enter</kbd> save annotation

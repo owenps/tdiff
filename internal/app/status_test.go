@@ -12,7 +12,7 @@ func TestStatusFooterHintsHaveNoLeadingDot(t *testing.T) {
 	m.width = 100
 
 	out := xansi.Strip(m.renderStatus())
-	idx := strings.Index(out, "a note")
+	idx := strings.Index(out, "a annotate")
 	if idx < 0 {
 		t.Fatalf("status missing footer hints:\n%s", out)
 	}

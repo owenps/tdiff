@@ -1,4 +1,4 @@
-package notes
+package annotate
 
 import (
 	"encoding/json"
@@ -16,7 +16,7 @@ const (
 	SideNew Side = "new"
 )
 
-type Note struct {
+type Annotation struct {
 	ID         string    `json:"id"`
 	Path       string    `json:"path"`
 	Side       Side      `json:"side"`
@@ -40,9 +40,9 @@ type ViewedFile struct {
 }
 
 type Store struct {
-	Notes  []Note       `json:"notes"`
-	Viewed []ViewedFile `json:"viewed"`
-	path   string
+	Annotations []Annotation `json:"annotations"`
+	Viewed      []ViewedFile `json:"viewed"`
+	path        string
 }
 
 func Open(gitRoot string) (*Store, error) {
@@ -50,20 +50,43 @@ func Open(gitRoot string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	path := filepath.Join(gitDir, "tdiff", "notes.json")
+	path := filepath.Join(gitDir, "tdiff", "annotations.json")
+	legacyPath := filepath.Join(gitDir, "tdiff", "notes.json")
 	store := &Store{path: path}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return store, nil
+			b, err = os.ReadFile(legacyPath)
+			if os.IsNotExist(err) {
+				return store, nil
+			}
 		}
-		return nil, err
+		if err != nil {
+			return nil, err
+		}
 	}
-	if err := json.Unmarshal(b, store); err != nil {
+	if err := decodeStore(b, store); err != nil {
 		return nil, err
 	}
 	store.path = path
 	return store, nil
+}
+
+func decodeStore(b []byte, store *Store) error {
+	var payload struct {
+		Annotations []Annotation `json:"annotations"`
+		LegacyNotes []Annotation `json:"notes"`
+		Viewed      []ViewedFile `json:"viewed"`
+	}
+	if err := json.Unmarshal(b, &payload); err != nil {
+		return err
+	}
+	store.Annotations = payload.Annotations
+	if len(store.Annotations) == 0 {
+		store.Annotations = payload.LegacyNotes
+	}
+	store.Viewed = payload.Viewed
+	return nil
 }
 
 func resolveGitDir(gitRoot string) (string, error) {
@@ -103,7 +126,7 @@ func (s *Store) Save() error {
 	return os.WriteFile(s.path, append(b, '\n'), 0o644)
 }
 
-func (s *Store) Add(n Note) error {
+func (s *Store) Add(n Annotation) error {
 	now := time.Now()
 	if n.ID == "" {
 		n.ID = fmt.Sprintf("%d", now.UnixNano())
@@ -122,15 +145,15 @@ func (s *Store) Add(n Note) error {
 	}
 	n.CreatedAt = now
 	n.UpdatedAt = now
-	s.Notes = append(s.Notes, n)
+	s.Annotations = append(s.Annotations, n)
 	return s.Save()
 }
 
 func (s *Store) UpdateBody(id, body string) error {
-	for i := range s.Notes {
-		if s.Notes[i].ID == id {
-			s.Notes[i].Body = body
-			s.Notes[i].UpdatedAt = time.Now()
+	for i := range s.Annotations {
+		if s.Annotations[i].ID == id {
+			s.Annotations[i].Body = body
+			s.Annotations[i].UpdatedAt = time.Now()
 			return s.Save()
 		}
 	}
@@ -138,18 +161,18 @@ func (s *Store) UpdateBody(id, body string) error {
 }
 
 func (s *Store) Delete(id string) error {
-	for i := range s.Notes {
-		if s.Notes[i].ID == id {
-			s.Notes = append(s.Notes[:i], s.Notes[i+1:]...)
+	for i := range s.Annotations {
+		if s.Annotations[i].ID == id {
+			s.Annotations = append(s.Annotations[:i], s.Annotations[i+1:]...)
 			return s.Save()
 		}
 	}
 	return fmt.Errorf("annotation not found")
 }
 
-func (s *Store) NotesFor(path string) []Note {
-	var out []Note
-	for _, n := range s.Notes {
+func (s *Store) AnnotationsFor(path string) []Annotation {
+	var out []Annotation
+	for _, n := range s.Annotations {
 		if n.Path == path && !n.Outdated {
 			out = append(out, normalize(n))
 		}
@@ -157,7 +180,7 @@ func (s *Store) NotesFor(path string) []Note {
 	return out
 }
 
-func normalize(n Note) Note {
+func normalize(n Annotation) Annotation {
 	if n.LineStart == 0 {
 		n.LineStart = n.Line
 	}
@@ -203,7 +226,7 @@ func (s *Store) IsViewed(path, diffHash string) bool {
 
 func (s *Store) ExportMarkdown() string {
 	out := "# tdiff annotations\n\n"
-	for _, n := range s.Notes {
+	for _, n := range s.Annotations {
 		if n.Outdated || n.Status == "resolved" {
 			continue
 		}

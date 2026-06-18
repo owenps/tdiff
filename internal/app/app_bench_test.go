@@ -3,8 +3,8 @@ package app
 import (
 	"testing"
 
+	"github.com/owenps/tdiff/internal/annotate"
 	"github.com/owenps/tdiff/internal/diff"
-	"github.com/owenps/tdiff/internal/notes"
 	"github.com/owenps/tdiff/internal/review"
 )
 
@@ -33,7 +33,7 @@ func benchModel(lines int) Model {
 	}
 	file := diff.File{NewPath: "big.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: diffLines}}}
 	return Model{
-		store:       &notes.Store{},
+		store:       &annotate.Store{},
 		cursor:      review.NewCursor([]diff.File{file}),
 		width:       120,
 		height:      40,

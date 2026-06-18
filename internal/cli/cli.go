@@ -7,9 +7,9 @@ import (
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/owenps/tdiff/internal/annotate"
 	"github.com/owenps/tdiff/internal/app"
 	"github.com/owenps/tdiff/internal/git"
-	"github.com/owenps/tdiff/internal/notes"
 )
 
 func Run() error {
@@ -19,7 +19,7 @@ func Run() error {
 		if err != nil {
 			return err
 		}
-		store, err := notes.Open(repo.Root)
+		store, err := annotate.Open(repo.Root)
 		if err != nil {
 			return err
 		}

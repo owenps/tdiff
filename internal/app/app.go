@@ -12,10 +12,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
+	"github.com/owenps/tdiff/internal/annotate"
 	"github.com/owenps/tdiff/internal/annotations"
 	"github.com/owenps/tdiff/internal/diff"
 	"github.com/owenps/tdiff/internal/git"
-	"github.com/owenps/tdiff/internal/notes"
 	"github.com/owenps/tdiff/internal/review"
 	"github.com/owenps/tdiff/internal/snapshot"
 )
@@ -29,7 +29,7 @@ type Config struct {
 type Model struct {
 	repo        git.Repo
 	cfg         Config
-	store       *notes.Store
+	store       *annotate.Store
 	annotations annotations.Workflow
 
 	allFiles []diff.File
@@ -39,23 +39,24 @@ type Model struct {
 	width  int
 	height int
 
-	pendingKey    string
-	jumpPrompt    bool
-	jumpInput     string
-	split         bool
-	syntax        bool
-	contextDim    bool
-	showHelp      bool
-	hideViewed    bool
-	notesOnly     bool
-	hideSidebar   bool
-	composing     bool
-	editingNoteID string
-	pendingTarget annotations.Target
-	editor        textarea.Model
-	status        string
-	statusID      int
-	syntaxCache   map[string]string
+	pendingKey          string
+	jumpPrompt          bool
+	jumpInput           string
+	split               bool
+	syntax              bool
+	contextDim          bool
+	showHelp            bool
+	hideViewed          bool
+	annotationsOnly     bool
+	hideSidebar         bool
+	composing           bool
+	editingAnnotationID string
+	pendingTarget       annotations.Target
+	editor              textarea.Model
+	status              string
+	statusID            int
+	composerBaseView    string
+	syntaxCache         map[string]string
 }
 
 func New(ctx context.Context, cfg Config) (Model, error) {
@@ -63,7 +64,7 @@ func New(ctx context.Context, cfg Config) (Model, error) {
 	if err != nil {
 		return Model{}, err
 	}
-	store, err := notes.Open(repo.Root)
+	store, err := annotate.Open(repo.Root)
 	if err != nil {
 		return Model{}, err
 	}
@@ -102,8 +103,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					m.status = "annotation saved"
 					m.composing = false
+					m.composerBaseView = ""
 					m.cursor.CancelRange()
-					m.editingNoteID = ""
+					m.editingAnnotationID = ""
 					m.pendingTarget = annotations.Target{}
 					m.editor.Blur()
 					m.editor.Reset()
@@ -111,8 +113,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.statusToastCmd(previousStatus)
 			case "esc":
 				m.composing = false
+				m.composerBaseView = ""
 				m.cursor.CancelRange()
-				m.editingNoteID = ""
+				m.editingAnnotationID = ""
 				m.pendingTarget = annotations.Target{}
 				m.editor.Blur()
 				m.editor.Reset()
@@ -196,17 +199,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = fmt.Sprintf("hide viewed: %t", m.hideViewed)
 		case "m":
 			m.pendingKey = ""
-			m.notesOnly = !m.notesOnly
+			m.annotationsOnly = !m.annotationsOnly
 			m.applyFilters()
-			m.status = fmt.Sprintf("notes only: %t", m.notesOnly)
+			m.status = fmt.Sprintf("annotations only: %t", m.annotationsOnly)
 		case "b":
 			m.pendingKey = ""
 			m.hideSidebar = !m.hideSidebar
 			m.status = fmt.Sprintf("sidebar: %t", !m.hideSidebar)
 		case "y":
 			m.pendingKey = ""
-			if note, ok := m.selectedAnnotation(); ok {
-				if err := clipboard.WriteAll(noteMarkdown(note)); err != nil {
+			if annotation, ok := m.selectedAnnotation(); ok {
+				if err := clipboard.WriteAll(annotationMarkdown(annotation)); err != nil {
 					m.status = err.Error()
 				} else {
 					m.status = "annotation copied"
@@ -286,8 +289,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.startNewAnnotation(target)
 				return m, textarea.Blink
 			}
-			if note, ok := m.selectedAnnotation(); ok {
-				m.startEditAnnotation(note)
+			if annotation, ok := m.selectedAnnotation(); ok {
+				m.startEditAnnotation(annotation)
 				return m, textarea.Blink
 			}
 			if target, err := m.singleLineTarget(); err == nil {
@@ -296,19 +299,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "e":
 			m.pendingKey = ""
-			if note, ok := m.selectedAnnotation(); ok {
-				m.startEditAnnotation(note)
+			if annotation, ok := m.selectedAnnotation(); ok {
+				m.startEditAnnotation(annotation)
 				return m, textarea.Blink
 			}
 			m.status = "no annotation on selected line"
 		case "d":
 			m.pendingKey = ""
-			if note, ok := m.selectedAnnotation(); ok {
-				if err := m.annotations.Delete(note.ID); err != nil {
+			if annotation, ok := m.selectedAnnotation(); ok {
+				if err := m.annotations.Delete(annotation.ID); err != nil {
 					m.status = err.Error()
 				} else {
 					m.status = "annotation deleted"
-					if m.notesOnly {
+					if m.annotationsOnly {
 						m.applyFilters()
 					}
 				}
@@ -321,6 +324,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) View() string {
+	if m.composing {
+		view := m.composerBaseView
+		if view == "" {
+			view = m.reviewView()
+		}
+		return view + "\n" + m.editor.View() + "\n⌥+enter save · esc cancel"
+	}
+
+	view := m.reviewView()
+	if m.showHelp {
+		return overlay(view, m.renderHelp(), m.width, m.height)
+	}
+	return view
+}
+
+func (m Model) reviewView() string {
 	if len(m.cursor.Files()) == 0 {
 		if len(m.allFiles) > 0 {
 			return dimStyle.Render("no files match filters · press u/m") + "\n"
@@ -347,15 +366,7 @@ func (m Model) View() string {
 		sidebar := m.renderSidebar(bodyHeight)
 		body = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, diffPane)
 	}
-	status := m.renderStatus()
-	view := body + "\n" + status
-	if m.composing {
-		return view + "\n" + m.editor.View() + "\n⌥+enter save · esc cancel"
-	}
-	if m.showHelp {
-		return overlay(view, m.renderHelp(), m.width, m.height)
-	}
-	return view
+	return body + "\n" + m.renderStatus()
 }
 
 func (m *Model) reload(ctx context.Context) error {
@@ -372,11 +383,11 @@ func (m *Model) reload(ctx context.Context) error {
 
 func (m *Model) applyFilters() {
 	m.cursor.SetFilteredFiles(m.allFiles, review.FileFilter{
-		HideViewed: m.hideViewed,
-		NotesOnly:  m.notesOnly,
-		DiffHash:   m.diffHash,
-		IsViewed:   m.store.IsViewed,
-		NoteCount:  m.noteCount,
+		HideViewed:      m.hideViewed,
+		AnnotationsOnly: m.annotationsOnly,
+		DiffHash:        m.diffHash,
+		IsViewed:        m.store.IsViewed,
+		AnnotationCount: m.annotationCount,
 	})
 }
 
@@ -390,21 +401,23 @@ func (m Model) selectedLine() displayLine {
 	return m.cursor.SelectedLine()
 }
 
-func (m Model) selectedAnnotation() (notes.Note, bool) {
+func (m Model) selectedAnnotation() (annotate.Annotation, bool) {
 	return m.cursor.SelectedAnnotation(m.annotations.AnnotationAt)
 }
 
-func (m *Model) startEditAnnotation(note notes.Note) {
-	m.editingNoteID = note.ID
+func (m *Model) startEditAnnotation(annotation annotate.Annotation) {
+	m.composerBaseView = m.reviewView()
+	m.editingAnnotationID = annotation.ID
 	m.pendingTarget = annotations.Target{}
 	m.editor.Reset()
-	m.editor.SetValue(note.Body)
+	m.editor.SetValue(annotation.Body)
 	m.composing = true
 	m.editor.Focus()
 }
 
 func (m *Model) startNewAnnotation(target annotations.Target) {
-	m.editingNoteID = ""
+	m.composerBaseView = m.reviewView()
+	m.editingAnnotationID = ""
 	m.pendingTarget = target
 	m.editor.Reset()
 	m.composing = true
@@ -483,26 +496,26 @@ func sidebarStat(prefix string, count int) string {
 	return fmt.Sprintf("%s%d", prefix, count)
 }
 
-func (m Model) noteCount(path string) int {
-	return len(m.store.NotesFor(path))
+func (m Model) annotationCount(path string) int {
+	return len(m.store.AnnotationsFor(path))
 }
 
-func (m Model) totalNoteCount() int {
+func (m Model) totalAnnotationCount() int {
 	total := 0
 	for _, f := range m.cursor.Files() {
-		total += m.noteCount(f.Path())
+		total += m.annotationCount(f.Path())
 	}
 	return total
 }
 
-func (m Model) notesView(count int) string {
+func (m Model) annotationsView(count int) string {
 	if count == 0 {
 		return dimStyle.Render("  ")
 	}
 	return annotationStyle.Render(fmt.Sprintf("●%d", count))
 }
 
-func selectedSidebarLine(prefix, viewed string, nameW int, path, added, deleted string, noteCount, noteW int) string {
+func selectedSidebarLine(prefix, viewed string, nameW int, path, added, deleted string, annotationCount, annotationW int) string {
 	rail := selectedStyle.Render(prefix)
 	if strings.Contains(prefix, "▌") {
 		rail = selectedAnnotationStyle.Render("▌") + selectedStyle.Render(" ")
@@ -515,39 +528,39 @@ func selectedSidebarLine(prefix, viewed string, nameW int, path, added, deleted 
 		selectedStyle.Render(" ") +
 		selectedDeleteStyle.Render(deleted) +
 		selectedStyle.Render(" ") +
-		sidebarNoteView(noteCount, noteW, true)
+		sidebarAnnotationView(annotationCount, annotationW, true)
 	return padRightStyled(line, sidebarWidth, selectedStyle)
 }
 
-func sidebarNoteView(count, width int, selected bool) string {
-	note := strings.Repeat(" ", width)
+func sidebarAnnotationView(count, width int, selected bool) string {
+	annotation := strings.Repeat(" ", width)
 	if count > 0 {
-		note = fmt.Sprintf("%*s", width, fmt.Sprintf("●%d", count))
+		annotation = fmt.Sprintf("%*s", width, fmt.Sprintf("●%d", count))
 	}
 	if count == 0 {
 		if selected {
-			return selectedStyle.Render(note)
+			return selectedStyle.Render(annotation)
 		}
-		return dimStyle.Render(note)
+		return dimStyle.Render(annotation)
 	}
 	if selected {
-		return selectedAnnotationStyle.Render(note)
+		return selectedAnnotationStyle.Render(annotation)
 	}
-	return annotationStyle.Render(note)
+	return annotationStyle.Render(annotation)
 }
 
-func sidebarColumnWidths(files []diff.File, noteCount func(string) int) (int, int, int, int) {
-	addW, delW, noteW := 2, 2, 2
+func sidebarColumnWidths(files []diff.File, annotationCount func(string) int) (int, int, int, int) {
+	addW, delW, annotationW := 2, 2, 2
 	for _, f := range files {
 		stats := fileStats(f)
 		addW = max(addW, xansi.StringWidth(sidebarStat("+", stats.Added)))
 		delW = max(delW, xansi.StringWidth(sidebarStat("-", stats.Deleted)))
-		if notes := noteCount(f.Path()); notes > 0 {
-			noteW = max(noteW, xansi.StringWidth(fmt.Sprintf("●%d", notes)))
+		if annotations := annotationCount(f.Path()); annotations > 0 {
+			annotationW = max(annotationW, xansi.StringWidth(fmt.Sprintf("●%d", annotations)))
 		}
 	}
-	nameW := max(8, sidebarWidth-7-addW-delW-noteW)
-	return nameW, addW, delW, noteW
+	nameW := max(8, sidebarWidth-7-addW-delW-annotationW)
+	return nameW, addW, delW, annotationW
 }
 
 func sidebarPath(path string, width int, selected, viewed bool) string {
@@ -643,7 +656,7 @@ func (m *Model) prevAnnotation() {
 }
 
 func (m *Model) jumpAnnotation(delta int) {
-	idx, total, ok := m.cursor.JumpAnnotation(delta, m.bodyHeight(), m.store.NotesFor)
+	idx, total, ok := m.cursor.JumpAnnotation(delta, m.bodyHeight(), m.store.AnnotationsFor)
 	if !ok {
 		m.status = "no annotations"
 		return
@@ -678,14 +691,14 @@ func (m Model) renderSidebar(height int) string {
 	style := lipgloss.NewStyle().Width(sidebarWidth)
 	files := m.cursor.Files()
 	fileIdx := m.cursor.FileIndex()
-	nameW, addW, delW, noteW := sidebarColumnWidths(files, m.noteCount)
+	nameW, addW, delW, annotationW := sidebarColumnWidths(files, m.annotationCount)
 	previewHeight := 0
-	if height >= 12 && m.totalNoteCount() > 0 {
+	if height >= 12 && m.totalAnnotationCount() > 0 {
 		previewHeight = min(7, height/3)
 	}
 	fileHeight := height - previewHeight
 	var rows []string
-	rows = append(rows, titleStyle.Render("tdiff")+" "+m.sidebarStatsView(m.totalStats())+" "+m.notesView(m.totalNoteCount()))
+	rows = append(rows, titleStyle.Render("tdiff")+" "+m.sidebarStatsView(m.totalStats())+" "+m.annotationsView(m.totalAnnotationCount()))
 	start := clamp(fileIdx-fileHeight/2, 0, max(0, len(files)-fileHeight+1))
 	end := min(len(files), start+fileHeight-1)
 	for i := start; i < end; i++ {
@@ -700,14 +713,14 @@ func (m Model) renderSidebar(height int) string {
 			viewed = "✓"
 		}
 		stats := fileStats(f)
-		noteCount := m.noteCount(path)
+		annotationCount := m.annotationCount(path)
 		addedText := fmt.Sprintf("%*s", addW, sidebarStat("+", stats.Added))
 		deletedText := fmt.Sprintf("%*s", delW, sidebarStat("-", stats.Deleted))
 		added := addStyle.Render(addedText)
 		deleted := deleteStyle.Render(deletedText)
-		line := fmt.Sprintf("%s%s %s %s %s %s", prefix, viewed, sidebarPath(path, nameW, false, viewed == "✓"), added, deleted, sidebarNoteView(noteCount, noteW, false))
+		line := fmt.Sprintf("%s%s %s %s %s %s", prefix, viewed, sidebarPath(path, nameW, false, viewed == "✓"), added, deleted, sidebarAnnotationView(annotationCount, annotationW, false))
 		if i == fileIdx {
-			line = selectedSidebarLine(prefix, viewed, nameW, path, addedText, deletedText, noteCount, noteW)
+			line = selectedSidebarLine(prefix, viewed, nameW, path, addedText, deletedText, annotationCount, annotationW)
 		} else if viewed == "✓" {
 			line = dimStyle.Render(line)
 		}
@@ -720,7 +733,7 @@ func (m Model) renderSidebar(height int) string {
 }
 
 func (m Model) annotationPositions() []review.AnnotationPosition {
-	return m.cursor.AnnotationPositions(m.store.NotesFor)
+	return m.cursor.AnnotationPositions(m.store.AnnotationsFor)
 }
 
 func (m Model) renderAnnotationPreview(maxRows int) []string {
@@ -735,7 +748,7 @@ func (m Model) renderAnnotationPreview(maxRows int) []string {
 	start := 0
 	if hasSelected {
 		for i, p := range positions {
-			if p.Note.ID == selected.ID {
+			if p.Annotation.ID == selected.ID {
 				start = clamp(i-maxItems/2, 0, max(0, len(positions)-maxItems))
 				break
 			}
@@ -743,12 +756,12 @@ func (m Model) renderAnnotationPreview(maxRows int) []string {
 	}
 	for i := start; i < len(positions) && remaining > 0; i++ {
 		p := positions[i]
-		loc := fmt.Sprintf("● %s:%d", compactPath(p.Note.Path, sidebarWidth-8), p.Note.LineStart)
-		if p.Note.LineEnd != 0 && p.Note.LineEnd != p.Note.LineStart {
-			loc = fmt.Sprintf("● %s:%d-%d", compactPath(p.Note.Path, sidebarWidth-10), p.Note.LineStart, p.Note.LineEnd)
+		loc := fmt.Sprintf("● %s:%d", compactPath(p.Annotation.Path, sidebarWidth-8), p.Annotation.LineStart)
+		if p.Annotation.LineEnd != 0 && p.Annotation.LineEnd != p.Annotation.LineStart {
+			loc = fmt.Sprintf("● %s:%d-%d", compactPath(p.Annotation.Path, sidebarWidth-10), p.Annotation.LineStart, p.Annotation.LineEnd)
 		}
-		body := "  " + truncate(strings.ReplaceAll(p.Note.Body, "\n", " "), sidebarWidth-2)
-		isSelected := hasSelected && selected.ID == p.Note.ID
+		body := "  " + truncate(strings.ReplaceAll(p.Annotation.Body, "\n", " "), sidebarWidth-2)
+		isSelected := hasSelected && selected.ID == p.Annotation.ID
 		if isSelected {
 			rows = append(rows, padRightStyled(selectedAnnotationStyle.Render(truncate(loc, sidebarWidth)), sidebarWidth, selectedStyle))
 		} else {
@@ -771,8 +784,8 @@ func (m Model) renderAnnotationPreview(maxRows int) []string {
 func (m Model) renderDiffHeader(width int) string {
 	path := compactPath(m.currentPath(), max(12, width-18))
 	stats := m.statsView(fileStats(m.cursor.Files()[m.cursor.FileIndex()]))
-	if notes := m.noteCount(m.currentPath()); notes > 0 {
-		stats += " " + annotationStyle.Render(fmt.Sprintf("●%d", notes))
+	if annotations := m.annotationCount(m.currentPath()); annotations > 0 {
+		stats += " " + annotationStyle.Render(fmt.Sprintf("●%d", annotations))
 	}
 	line := titleStyle.Render(path) + "  " + stats
 	return padRight(truncate(line, width), width)
@@ -785,8 +798,8 @@ func (m Model) renderStatus() string {
 	}
 	files := m.cursor.Files()
 	stats := m.statsView(m.totalStats())
-	if notes := m.totalNoteCount(); notes > 0 {
-		stats += " " + annotationStyle.Render(fmt.Sprintf("●%d", notes))
+	if annotations := m.totalAnnotationCount(); annotations > 0 {
+		stats += " " + annotationStyle.Render(fmt.Sprintf("●%d", annotations))
 	}
 	parts := []string{dimStyle.Render(mode), dimStyle.Render(fmt.Sprintf("%d/%d", min(m.cursor.FileIndex()+1, len(files)), len(files))), stats}
 	if m.split {
@@ -798,8 +811,8 @@ func (m Model) renderStatus() string {
 	if m.hideViewed {
 		parts = append(parts, dimStyle.Render("hide-viewed"))
 	}
-	if m.notesOnly {
-		parts = append(parts, dimStyle.Render("notes-only"))
+	if m.annotationsOnly {
+		parts = append(parts, dimStyle.Render("annotations-only"))
 	}
 	if m.hideSidebar {
 		parts = append(parts, dimStyle.Render("sidebar-off"))
@@ -860,9 +873,9 @@ func (m Model) footerHints() string {
 		return "? close"
 	}
 	if _, ok := m.selectedAnnotation(); ok {
-		return "e edit · d delete · ]a/[a notes · y copy"
+		return "e edit · d delete · ]a/[a annotations · y copy"
 	}
-	return "a note · r range · v viewed · b sidebar · ? help"
+	return "a annotate · r range · v viewed · b sidebar · ? help"
 }
 
 func (m Model) renderHelp() string {
@@ -878,12 +891,12 @@ func (m Model) renderHelp() string {
 		"review",
 		"  v          toggle viewed",
 		"  u          hide/show viewed files",
-		"  m          notes-only filter",
+		"  m          annotations-only filter",
 		"  r          start/cancel range",
-		"  a/e/d      add/edit/delete note",
-		"  y/Y        copy selected/all notes",
-		"  ⌥+enter    save note",
-		"  esc        cancel note",
+		"  a/e/d      annotate/edit/delete",
+		"  y/Y        copy selected/all annotations",
+		"  ⌥+enter    save annotation",
+		"  esc        cancel annotation",
 		"",
 		"view",
 		"  s          split/unified",
@@ -912,14 +925,14 @@ func helpBox(title string, lines []string, width int) string {
 
 func (m *Model) saveAnnotation() error {
 	target := m.pendingTarget
-	if m.editingNoteID == "" && target.LineStart == 0 {
+	if m.editingAnnotationID == "" && target.LineStart == 0 {
 		var err error
 		target, err = m.singleLineTarget()
 		if err != nil {
 			return err
 		}
 	}
-	return m.annotations.Save(m.currentPath(), m.diffHash, m.editingNoteID, target, m.editor.Value())
+	return m.annotations.Save(m.currentPath(), m.diffHash, m.editingAnnotationID, target, m.editor.Value())
 }
 
 const (
@@ -1045,7 +1058,7 @@ func padRightStyled(s string, width int, style lipgloss.Style) string {
 	return s + style.Render(strings.Repeat(" ", width-w))
 }
 
-func noteMarkdown(n notes.Note) string {
+func annotationMarkdown(n annotate.Annotation) string {
 	loc := fmt.Sprintf("%s:%d", n.Path, n.LineStart)
 	if n.LineEnd != 0 && n.LineEnd != n.LineStart {
 		loc = fmt.Sprintf("%s:%d-%d", n.Path, n.LineStart, n.LineEnd)

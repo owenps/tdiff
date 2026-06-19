@@ -52,7 +52,11 @@ func TestRenderSidebarGivesAnnotationsMoreRoomWhenScreenPermits(t *testing.T) {
 		notes = append(notes, annotate.Annotation{ID: fmt.Sprintf("n%d", i), Path: path, Side: annotate.SideNew, LineStart: 1, LineEnd: 1, Body: fmt.Sprintf("note %d", i)})
 	}
 	store := &annotate.Store{Annotations: notes}
-	m := Model{store: store, annotations: annotations.NewWorkflow(store), session: review.NewSession(files), width: 100}
+	workflow := annotations.NewWorkflow(store)
+	session := review.NewSession(files)
+	session.SetFilterSources(store, func(path string) int { return len(store.AnnotationsFor(path)) })
+	session.SetAnnotationSources(store.AnnotationsFor, workflow.AnnotationAt)
+	m := Model{store: store, annotations: workflow, session: session, width: 100}
 
 	out := xansi.Strip(m.renderSidebar(30))
 	if !strings.Contains(out, "note 4") {

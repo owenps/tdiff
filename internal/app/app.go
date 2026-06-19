@@ -46,8 +46,6 @@ type Model struct {
 	contextDim          bool
 	wrapCursorLine      bool
 	showHelp            bool
-	hideViewed          bool
-	annotationsOnly     bool
 	hideSidebar         bool
 	composing           bool
 	editingAnnotationID string
@@ -69,7 +67,8 @@ func New(ctx context.Context, cfg Config) (Model, error) {
 		return Model{}, err
 	}
 	m := Model{repo: repo, cfg: cfg, store: store, annotations: annotations.NewWorkflow(store), session: review.NewSession(nil), syntax: true, contextDim: true, syntaxCache: make(map[string]string)}
-	m.session.SetFilterSources(store.IsViewed, m.annotationCount)
+	m.session.SetFilterSources(store, m.annotationCount)
+	m.session.SetAnnotationSources(store.AnnotationsFor, m.annotations.AnnotationAt)
 	m.editor = textarea.New()
 	m.editor.Placeholder = "annotation"
 	m.editor.CharLimit = 4000
@@ -211,14 +210,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = fmt.Sprintf("context dim: %t", m.contextDim)
 		case "u":
 			m.pendingKey = ""
-			m.hideViewed = !m.hideViewed
-			m.applyFilters()
-			m.status = fmt.Sprintf("hide viewed: %t", m.hideViewed)
+			m.status = fmt.Sprintf("hide viewed: %t", m.session.ToggleHideViewed())
 		case "m":
 			m.pendingKey = ""
-			m.annotationsOnly = !m.annotationsOnly
-			m.applyFilters()
-			m.status = fmt.Sprintf("annotations only: %t", m.annotationsOnly)
+			m.status = fmt.Sprintf("annotations only: %t", m.session.ToggleAnnotationsOnly())
 		case "b":
 			m.pendingKey = ""
 			m.hideSidebar = !m.hideSidebar
@@ -262,21 +257,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "v":
 			m.pendingKey = ""
-			path := m.currentPath()
-			if path != "" {
-				if m.store.IsViewed(path, m.session.DiffHash()) {
-					_ = m.store.ClearViewed(path)
+			result, err := m.session.ToggleViewed()
+			if err != nil {
+				m.status = err.Error()
+				break
+			}
+			if result.Path != "" {
+				if !result.Viewed {
 					m.status = "unmarked viewed"
+				} else if m.session.HideViewed() || result.Advanced {
+					m.status = "marked viewed"
 				} else {
-					_ = m.store.MarkViewed(path, m.session.DiffHash())
-					if m.hideViewed {
-						m.applyFilters()
-						m.status = "marked viewed"
-					} else if m.advanceToNextUnviewed() {
-						m.status = "marked viewed"
-					} else {
-						m.status = "marked viewed; no next unviewed file"
-					}
+					m.status = "marked viewed; no next unviewed file"
 				}
 			}
 		case "r":
@@ -332,8 +324,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.status = err.Error()
 				} else {
 					m.status = "annotation deleted"
-					if m.annotationsOnly {
-						m.applyFilters()
+					if m.session.AnnotationsOnly() {
+						m.session.RefreshFilters()
 					}
 				}
 				break
@@ -407,10 +399,6 @@ func (m *Model) reload(ctx context.Context) error {
 	return nil
 }
 
-func (m *Model) applyFilters() {
-	m.session.SetFilters(m.hideViewed, m.annotationsOnly)
-}
-
 type displayLine = review.DisplayLine
 
 func (m Model) currentLines() []displayLine {
@@ -422,7 +410,7 @@ func (m Model) selectedLine() displayLine {
 }
 
 func (m Model) selectedAnnotation() (annotate.Annotation, bool) {
-	return m.session.SelectedAnnotation(m.annotations.AnnotationAt)
+	return m.session.SelectedAnnotation()
 }
 
 func (m *Model) startEditAnnotation(annotation annotate.Annotation) {
@@ -696,7 +684,7 @@ func (m *Model) prevAnnotation() {
 }
 
 func (m *Model) jumpAnnotation(delta int) {
-	idx, total, ok := m.session.JumpAnnotation(delta, m.bodyHeight(), m.store.AnnotationsFor)
+	idx, total, ok := m.session.JumpAnnotation(delta, m.bodyHeight())
 	if !ok {
 		m.status = "no annotations"
 		return
@@ -723,10 +711,6 @@ func (m Model) footerHeight() int {
 	return 1
 }
 
-func (m *Model) advanceToNextUnviewed() bool {
-	return m.session.AdvanceToNextUnviewed()
-}
-
 func (m Model) renderSidebar(height int) string {
 	style := lipgloss.NewStyle().Width(sidebarWidth)
 	files := m.session.Files()
@@ -746,7 +730,7 @@ func (m Model) renderSidebar(height int) string {
 			prefix = "▌ "
 		}
 		viewed := " "
-		if m.store.IsViewed(path, m.session.DiffHash()) {
+		if m.session.IsViewed(path) {
 			viewed = "✓"
 		}
 		stats := fileStats(f)
@@ -784,9 +768,8 @@ func sidebarAnnotationHeight(height, annotationCount int) int {
 }
 
 func (m Model) annotationPositions() []review.AnnotationPosition {
-	return m.session.AnnotationPositions(m.store.AnnotationsFor)
+	return m.session.AnnotationPositions()
 }
-
 func (m Model) renderAnnotationPreview(maxRows int) []string {
 	positions := m.annotationPositions()
 	if len(positions) == 0 || maxRows <= 1 {
@@ -865,10 +848,10 @@ func (m Model) renderStatus() string {
 	if m.cfg.IgnoreWhitespace {
 		parts = append(parts, dimStyle.Render("ignore-space"))
 	}
-	if m.hideViewed {
+	if m.session.HideViewed() {
 		parts = append(parts, dimStyle.Render("hide-viewed"))
 	}
-	if m.annotationsOnly {
+	if m.session.AnnotationsOnly() {
 		parts = append(parts, dimStyle.Render("annotations-only"))
 	}
 	if m.hideSidebar {

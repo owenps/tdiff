@@ -108,10 +108,14 @@ func diffPaneTestModel(split bool) Model {
 		{Kind: diff.Add, NewNo: 1, Text: "+new"},
 	}}}}
 	store := &annotate.Store{Annotations: []annotate.Annotation{{ID: "n1", Path: "foo.go", Side: annotate.SideOld, LineStart: 1, LineEnd: 1}}}
+	workflow := annotations.NewWorkflow(store)
+	session := review.NewSession([]diff.File{file})
+	session.SetFilterSources(store, func(path string) int { return len(store.AnnotationsFor(path)) })
+	session.SetAnnotationSources(store.AnnotationsFor, workflow.AnnotationAt)
 	return Model{
 		store:       store,
-		annotations: annotations.NewWorkflow(store),
-		session:     review.NewSession([]diff.File{file}),
+		annotations: workflow,
+		session:     session,
 		width:       80,
 		split:       split,
 		syntax:      false,

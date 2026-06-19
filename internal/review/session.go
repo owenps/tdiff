@@ -1,19 +1,35 @@
 package review
 
 import (
+	"fmt"
+
 	"github.com/owenps/tdiff/internal/annotate"
 	"github.com/owenps/tdiff/internal/diff"
 )
+
+type ViewedStore interface {
+	MarkViewed(path, diffHash string) error
+	ClearViewed(path string) error
+	IsViewed(path, diffHash string) bool
+}
+
+type ViewedToggleResult struct {
+	Path     string
+	Viewed   bool
+	Advanced bool
+}
 
 type Session struct {
 	allFiles []diff.File
 	diffHash string
 	cursor   Cursor
 
-	hideViewed      bool
-	annotationsOnly bool
-	isViewed        func(path, diffHash string) bool
-	annotationCount func(path string) int
+	hideViewed         bool
+	annotationsOnly    bool
+	viewed             ViewedStore
+	annotationCount    func(path string) int
+	annotationsForPath func(path string) []annotate.Annotation
+	annotationAt       func(path string, line diff.Line) (annotate.Annotation, bool)
 }
 
 func NewSession(files []diff.File) Session {
@@ -26,10 +42,15 @@ func (s *Session) SetSnapshot(files []diff.File, diffHash string) {
 	s.applyFilters()
 }
 
-func (s *Session) SetFilterSources(isViewed func(path, diffHash string) bool, annotationCount func(path string) int) {
-	s.isViewed = isViewed
+func (s *Session) SetFilterSources(viewed ViewedStore, annotationCount func(path string) int) {
+	s.viewed = viewed
 	s.annotationCount = annotationCount
 	s.applyFilters()
+}
+
+func (s *Session) SetAnnotationSources(annotationsForPath func(string) []annotate.Annotation, annotationAt func(string, diff.Line) (annotate.Annotation, bool)) {
+	s.annotationsForPath = annotationsForPath
+	s.annotationAt = annotationAt
 }
 
 func (s *Session) SetFilters(hideViewed, annotationsOnly bool) {
@@ -38,16 +59,36 @@ func (s *Session) SetFilters(hideViewed, annotationsOnly bool) {
 	s.applyFilters()
 }
 
+func (s *Session) ToggleHideViewed() bool {
+	s.hideViewed = !s.hideViewed
+	s.applyFilters()
+	return s.hideViewed
+}
+
+func (s *Session) ToggleAnnotationsOnly() bool {
+	s.annotationsOnly = !s.annotationsOnly
+	s.applyFilters()
+	return s.annotationsOnly
+}
+
+func (s Session) HideViewed() bool { return s.hideViewed }
+
+func (s Session) AnnotationsOnly() bool { return s.annotationsOnly }
+
 func (s *Session) RefreshFilters() {
 	s.applyFilters()
 }
 
 func (s *Session) applyFilters() {
+	var isViewed func(path, diffHash string) bool
+	if s.viewed != nil {
+		isViewed = s.viewed.IsViewed
+	}
 	s.cursor.SetFilteredFiles(s.allFiles, FileFilter{
 		HideViewed:      s.hideViewed,
 		AnnotationsOnly: s.annotationsOnly,
 		DiffHash:        s.diffHash,
-		IsViewed:        s.isViewed,
+		IsViewed:        isViewed,
 		AnnotationCount: s.annotationCount,
 	})
 }
@@ -92,15 +133,54 @@ func (s Session) InActiveRange(idx int) bool { return s.cursor.InActiveRange(idx
 func (s *Session) AdvanceToNextFile(matches func(diff.File) bool) bool {
 	return s.cursor.AdvanceToNextFile(matches)
 }
+func (s Session) IsViewed(path string) bool {
+	return s.viewed != nil && s.viewed.IsViewed(path, s.diffHash)
+}
+
+func (s *Session) ToggleViewed() (ViewedToggleResult, error) {
+	path := s.CurrentPath()
+	if path == "" {
+		return ViewedToggleResult{}, nil
+	}
+	if s.viewed == nil {
+		return ViewedToggleResult{}, fmt.Errorf("viewed store not configured")
+	}
+	if s.viewed.IsViewed(path, s.diffHash) {
+		if err := s.viewed.ClearViewed(path); err != nil {
+			return ViewedToggleResult{}, err
+		}
+		s.applyFilters()
+		return ViewedToggleResult{Path: path}, nil
+	}
+	if err := s.viewed.MarkViewed(path, s.diffHash); err != nil {
+		return ViewedToggleResult{}, err
+	}
+	result := ViewedToggleResult{Path: path, Viewed: true}
+	if s.hideViewed {
+		s.applyFilters()
+		return result, nil
+	}
+	result.Advanced = s.AdvanceToNextUnviewed()
+	return result, nil
+}
+
 func (s *Session) AdvanceToNextUnviewed() bool {
-	return s.cursor.AdvanceToNextUnviewed(s.diffHash, s.isViewed)
+	return s.cursor.AdvanceToNextUnviewed(s.diffHash, func(path, diffHash string) bool {
+		return s.viewed != nil && s.viewed.IsViewed(path, diffHash)
+	})
 }
-func (s Session) AnnotationPositions(annotationsForPath func(string) []annotate.Annotation) []AnnotationPosition {
-	return s.cursor.AnnotationPositions(annotationsForPath)
+func (s Session) AnnotationPositions() []AnnotationPosition {
+	if s.annotationsForPath == nil {
+		return nil
+	}
+	return s.cursor.AnnotationPositions(s.annotationsForPath)
 }
-func (s *Session) JumpAnnotation(delta, height int, annotationsForPath func(string) []annotate.Annotation) (int, int, bool) {
-	return s.cursor.JumpAnnotation(delta, height, annotationsForPath)
+func (s *Session) JumpAnnotation(delta, height int) (int, int, bool) {
+	if s.annotationsForPath == nil {
+		return 0, 0, false
+	}
+	return s.cursor.JumpAnnotation(delta, height, s.annotationsForPath)
 }
-func (s Session) SelectedAnnotation(annotationAt func(path string, line diff.Line) (annotate.Annotation, bool)) (annotate.Annotation, bool) {
-	return s.cursor.SelectedAnnotation(annotationAt)
+func (s Session) SelectedAnnotation() (annotate.Annotation, bool) {
+	return s.cursor.SelectedAnnotation(s.annotationAt)
 }

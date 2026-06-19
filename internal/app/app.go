@@ -54,12 +54,7 @@ type Model struct {
 	editingAnnotationID string
 	pendingTarget       annotations.Target
 	editor              textarea.Model
-	prPicker            bool
-	prPickerLoading     bool
-	prPickerErr         string
-	prPickerInput       string
-	prPickerIndex       int
-	prCandidates        []gh.PullRequest
+	prPicker            prPicker
 	prAttaching         bool
 	refreshing          bool
 	status              string
@@ -126,31 +121,21 @@ func loadingSpinnerTick() tea.Cmd {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if _, ok := msg.(loadingSpinnerTickMsg); ok {
-		if !m.ready() || m.prPickerLoading || m.prAttaching || m.refreshing {
+		if !m.ready() || m.prPicker.Loading() || m.prAttaching || m.refreshing {
 			m.loadingFrame++
 			return m, loadingSpinnerTick()
 		}
 		return m, nil
 	}
 	if msg, ok := msg.(prListLoadedMsg); ok {
-		if !m.prPicker {
+		if !m.prPicker.Active() {
 			return m, nil
 		}
-		m.prPickerLoading = false
-		m.prCandidates = msg.prs
-		if msg.err != nil {
-			m.prPickerErr = "PR list failed; type number"
-		} else {
-			m.prPickerErr = ""
-			if m.store != nil && m.store.GitHub != nil {
-				for i, pr := range msg.prs {
-					if pr.Number == m.store.GitHub.Number {
-						m.prPickerIndex = i
-						break
-					}
-				}
-			}
+		attachedNumber := 0
+		if m.store != nil && m.store.GitHub != nil {
+			attachedNumber = m.store.GitHub.Number
 		}
+		m.prPicker.SetLoaded(msg.prs, msg.err, attachedNumber)
 		return m, nil
 	}
 	if msg, ok := msg.(prAttachLoadedMsg); ok {
@@ -261,7 +246,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editor.SetWidth(max(20, msg.Width-32))
 		m.ensureCursorVisible()
 	case tea.KeyMsg:
-		if m.prPicker {
+		if m.prPicker.Active() {
 			return m.updatePRPicker(msg)
 		}
 		if m.jumpPrompt {
@@ -478,8 +463,8 @@ func (m Model) View() string {
 		}
 		return view + "\n" + m.editor.View() + "\n⌥+enter save · esc cancel"
 	}
-	if m.prPicker {
-		return m.reviewView() + "\n" + m.renderPRPicker()
+	if m.prPicker.Active() {
+		return m.reviewView() + "\n" + m.prPicker.View(m.width, m.loadingFrame)
 	}
 
 	view := m.reviewView()
@@ -836,12 +821,7 @@ func (m *Model) openPRPicker() tea.Cmd {
 		m.status = "offline mode"
 		return nil
 	}
-	m.prPicker = true
-	m.prPickerLoading = true
-	m.prPickerErr = ""
-	m.prPickerInput = ""
-	m.prPickerIndex = 0
-	m.prCandidates = nil
+	m.prPicker.Open()
 	return tea.Batch(loadPRListCmd(m.repo.Root), loadingSpinnerTick())
 }
 
@@ -854,59 +834,17 @@ func loadPRListCmd(root string) tea.Cmd {
 
 func (m Model) updatePRPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	previousStatus := m.status
-	switch msg.String() {
-	case "esc":
-		m.prPicker = false
-		m.prPickerLoading = false
-		m.prPickerErr = ""
-		m.prPickerInput = ""
-		return m, nil
-	case "up", "k":
-		m.prPickerIndex = max(0, m.prPickerIndex-1)
-		return m, nil
-	case "down", "j":
-		m.prPickerIndex = min(max(0, len(m.filteredPRs())-1), m.prPickerIndex+1)
-		return m, nil
-	case "backspace":
-		if len(m.prPickerInput) > 0 {
-			m.prPickerInput = m.prPickerInput[:len(m.prPickerInput)-1]
-			m.prPickerIndex = 0
-		}
-		return m, nil
-	case "enter":
-		number, err := m.selectedPickerPRNumber()
-		if err != nil {
-			m.status = err.Error()
-			return m, m.statusToastCmd(previousStatus)
-		}
-		m.prPicker = false
-		m.prPickerLoading = false
-		m.prPickerErr = ""
-		m.prPickerInput = ""
-		m.prAttaching = true
-		m.status = fmt.Sprintf("attaching PR #%d…", number)
-		return m, tea.Batch(attachPRCmd(m.repo.Root, number), loadingSpinnerTick())
+	number, attach, err := m.prPicker.UpdateKey(msg)
+	if err != nil {
+		m.status = err.Error()
+		return m, m.statusToastCmd(previousStatus)
 	}
-	for _, r := range msg.Runes {
-		if r >= 32 && r != 127 {
-			m.prPickerInput += string(r)
-			m.prPickerIndex = 0
-		}
+	if !attach {
+		return m, nil
 	}
-	return m, nil
-}
-
-func (m Model) selectedPickerPRNumber() (int, error) {
-	input := strings.TrimSpace(m.prPickerInput)
-	if n, ok := parsePRNumber(input); ok {
-		return n, nil
-	}
-	filtered := m.filteredPRs()
-	if len(filtered) == 0 {
-		return 0, fmt.Errorf("no PR selected")
-	}
-	idx := clamp(m.prPickerIndex, 0, len(filtered)-1)
-	return filtered[idx].Number, nil
+	m.prAttaching = true
+	m.status = fmt.Sprintf("attaching PR #%d…", number)
+	return m, tea.Batch(attachPRCmd(m.repo.Root, number), loadingSpinnerTick())
 }
 
 func attachPRCmd(root string, number int) tea.Cmd {
@@ -919,71 +857,6 @@ func attachPRCmd(root string, number int) tea.Cmd {
 		threads, threadErr := client.Threads(context.Background(), pr)
 		return prAttachLoadedMsg{pr: pr, threads: threads, threadErr: threadErr}
 	}
-}
-
-func parsePRNumber(input string) (int, bool) {
-	input = strings.TrimSpace(input)
-	if input == "" {
-		return 0, false
-	}
-	if strings.Contains(input, "/pull/") {
-		parts := strings.Split(strings.TrimRight(input, "/"), "/")
-		input = parts[len(parts)-1]
-	} else if strings.Contains(input, "#") {
-		parts := strings.Split(input, "#")
-		input = parts[len(parts)-1]
-	}
-	n, err := strconv.Atoi(input)
-	return n, err == nil && n > 0
-}
-
-func (m Model) filteredPRs() []gh.PullRequest {
-	q := strings.ToLower(strings.TrimSpace(m.prPickerInput))
-	if q == "" {
-		return m.prCandidates
-	}
-	var out []gh.PullRequest
-	for _, pr := range m.prCandidates {
-		haystack := strings.ToLower(fmt.Sprintf("%d %s %s %s", pr.Number, pr.Title, pr.AuthorLogin, pr.HeadRef))
-		if strings.Contains(haystack, q) {
-			out = append(out, pr)
-		}
-	}
-	return out
-}
-
-func (m Model) renderPRPicker() string {
-	filtered := m.filteredPRs()
-	w := max(20, m.width)
-	rows := []string{fmt.Sprintf("# attach PR: %s", m.prPickerInput)}
-	if m.prPickerLoading {
-		frame := loadingSpinnerFrames[m.loadingFrame%len(loadingSpinnerFrames)]
-		rows = append(rows, dimStyle.Render(frame+" loading PRs…"))
-	} else if m.prPickerErr != "" {
-		rows = append(rows, errorStyle.Render("  "+m.prPickerErr))
-	} else if len(filtered) == 0 {
-		rows = append(rows, dimStyle.Render("  no matching PRs"))
-	} else {
-		limit := min(5, len(filtered))
-		start := clamp(m.prPickerIndex-limit/2, 0, max(0, len(filtered)-limit))
-		for i := start; i < start+limit && i < len(filtered); i++ {
-			pr := filtered[i]
-			prefix := "  "
-			style := dimStyle
-			if i == m.prPickerIndex {
-				prefix = "▌ "
-				style = selectedStyle
-			}
-			draft := ""
-			if pr.IsDraft {
-				draft = " draft"
-			}
-			line := fmt.Sprintf("%s#%d %s  %s  %s%s", prefix, pr.Number, truncate(pr.Title, max(10, w-36)), pr.AuthorLogin, pr.HeadRef, draft)
-			rows = append(rows, style.Render(truncate(line, w)))
-		}
-	}
-	rows = append(rows, dimStyle.Render("enter attach · esc cancel"))
-	return strings.Join(rows, "\n")
 }
 
 func (m Model) updateJumpPrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1289,7 +1162,7 @@ func statusView(s string) string {
 }
 
 func (m Model) footerHints() string {
-	if m.prPicker {
+	if m.prPicker.Active() {
 		return "# attach PR · enter attach · esc cancel"
 	}
 	if m.jumpPrompt {

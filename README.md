@@ -4,8 +4,28 @@
 
 Fast local diff review with annotations for humans + agents.
 
+![tdiff main review UI](docs/assets/screenshots/main-ui.png)
+
 > [!NOTE]
 > Github integration soon!
+
+## Screenshots
+
+### Multi-line Annotations
+
+Use <kbd>r</kbd> to start a multi-line select then <kbd>a</kbd> to start an annotation. 
+
+![tdiff range annotation](docs/assets/screenshots/annotation-range.png)
+
+### Unified and Split View
+
+![tdiff split view](docs/assets/screenshots/split-view.png)
+
+### Automatic Syntax Highlighting
+
+Toggle syntax on and off with <kbd>x</kbd>.
+
+![tdiff syntax off](docs/assets/screenshots/syntax-off.png)
 
 ## Installation
 

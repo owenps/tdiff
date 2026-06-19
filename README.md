@@ -4,7 +4,7 @@
 
 Review changes like a PR, without leaving terminal. tdiff is a fast local diff review with annotations for humans + agents.
 
-Export annotations as markdown for whereever you run your agents: Claude, Codex, Pi, etc.
+Export annotations as markdown for wherever you run your agents: Claude, Codex, Pi, etc.
 
 ![tdiff main review UI](docs/assets/screenshots/main-ui.png)
 

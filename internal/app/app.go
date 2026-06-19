@@ -1099,7 +1099,7 @@ func (m Model) renderStatus() string {
 		parts = append(parts, dimStyle.Render("offline"))
 	}
 	if m.store != nil && m.store.GitHub != nil && m.store.GitHub.Number > 0 {
-		parts = append(parts, dimStyle.Render(fmt.Sprintf("PR #%d", m.store.GitHub.Number)))
+		parts = append(parts, prStatusView(*m.store.GitHub))
 	}
 	if m.split {
 		parts = append(parts, dimStyle.Render("split"))
@@ -1152,6 +1152,26 @@ func (m Model) renderStatus() string {
 
 func joinDim(parts []string, sep string) string {
 	return strings.Join(parts, dimStyle.Render(sep))
+}
+
+func prStatusView(pr gh.AttachedPR) string {
+	label := fmt.Sprintf("PR #%d", pr.Number)
+	switch pr.Status {
+	case gh.PRStatusReady:
+		return successStyle.Render(label + " ready")
+	case gh.PRStatusDraft:
+		return dimStyle.Render(label + " draft")
+	case gh.PRStatusChanges:
+		return warningStyle.Render(label + " changes")
+	case gh.PRStatusBlocked:
+		return errorStyle.Render(label + " blocked")
+	case gh.PRStatusMerged:
+		return purpleStyle.Render(label + " merged")
+	case gh.PRStatusClosed:
+		return dimStyle.Render(label + " closed")
+	default:
+		return dimStyle.Render(label)
+	}
 }
 
 func statusView(s string) string {
@@ -1276,7 +1296,9 @@ var (
 	rangeDimStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Background(rangeBg)
 	selectedDimStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Background(selectedBg)
 	successStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	warningStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
 	errorStyle              = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	purpleStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("141"))
 	hunkColor               = lipgloss.Color("99")
 	hunkStyle               = lipgloss.NewStyle().Foreground(hunkColor)
 	selectedHunkStyle       = lipgloss.NewStyle().Foreground(hunkColor).Background(selectedBg)

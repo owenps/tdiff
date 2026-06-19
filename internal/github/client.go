@@ -39,15 +39,16 @@ func NewClient(dir string) Client {
 }
 
 type AttachedPR struct {
-	Owner       string `json:"owner"`
-	Repo        string `json:"repo"`
-	Number      int    `json:"pr_number"`
-	URL         string `json:"url,omitempty"`
-	Title       string `json:"title,omitempty"`
-	AuthorLogin string `json:"author_login,omitempty"`
-	HeadRef     string `json:"head_ref,omitempty"`
-	BaseRef     string `json:"base_ref,omitempty"`
-	HeadOID     string `json:"head_oid,omitempty"`
+	Owner       string   `json:"owner"`
+	Repo        string   `json:"repo"`
+	Number      int      `json:"pr_number"`
+	URL         string   `json:"url,omitempty"`
+	Title       string   `json:"title,omitempty"`
+	AuthorLogin string   `json:"author_login,omitempty"`
+	HeadRef     string   `json:"head_ref,omitempty"`
+	BaseRef     string   `json:"base_ref,omitempty"`
+	HeadOID     string   `json:"head_oid,omitempty"`
+	Status      PRStatus `json:"status,omitempty"`
 }
 
 type PullRequest struct {
@@ -97,8 +98,10 @@ func (c Client) AutoDetectPR(ctx context.Context) (AttachedPR, error) {
 	return pr, nil
 }
 
+const prViewFields = "number,url,title,author,headRefName,baseRefName,headRefOid,isDraft,state,mergedAt,mergeable,reviewDecision,statusCheckRollup"
+
 func (c Client) PRView(ctx context.Context, number ...int) (AttachedPR, error) {
-	args := []string{"pr", "view", "--json", "number,url,title,author,headRefName,baseRefName,headRefOid"}
+	args := []string{"pr", "view", "--json", prViewFields}
 	if len(number) > 0 && number[0] > 0 {
 		args = append([]string{"pr", "view", strconv.Itoa(number[0])}, args[2:]...)
 	}
@@ -107,13 +110,19 @@ func (c Client) PRView(ctx context.Context, number ...int) (AttachedPR, error) {
 		return AttachedPR{}, err
 	}
 	var raw struct {
-		Number      int    `json:"number"`
-		URL         string `json:"url"`
-		Title       string `json:"title"`
-		HeadRefName string `json:"headRefName"`
-		BaseRefName string `json:"baseRefName"`
-		HeadRefOID  string `json:"headRefOid"`
-		Author      struct {
+		Number            int             `json:"number"`
+		URL               string          `json:"url"`
+		Title             string          `json:"title"`
+		HeadRefName       string          `json:"headRefName"`
+		BaseRefName       string          `json:"baseRefName"`
+		HeadRefOID        string          `json:"headRefOid"`
+		IsDraft           bool            `json:"isDraft"`
+		State             string          `json:"state"`
+		MergedAt          *time.Time      `json:"mergedAt"`
+		Mergeable         string          `json:"mergeable"`
+		ReviewDecision    string          `json:"reviewDecision"`
+		StatusCheckRollup json.RawMessage `json:"statusCheckRollup"`
+		Author            struct {
 			Login string `json:"login"`
 		} `json:"author"`
 	}
@@ -124,7 +133,8 @@ func (c Client) PRView(ctx context.Context, number ...int) (AttachedPR, error) {
 	if err != nil {
 		return AttachedPR{}, err
 	}
-	return AttachedPR{Owner: repo.Owner, Repo: repo.Name, Number: raw.Number, URL: raw.URL, Title: raw.Title, AuthorLogin: raw.Author.Login, HeadRef: raw.HeadRefName, BaseRef: raw.BaseRefName, HeadOID: raw.HeadRefOID}, nil
+	status := derivePRStatus(raw.State, raw.MergedAt, raw.Mergeable, raw.ReviewDecision, raw.IsDraft, raw.StatusCheckRollup)
+	return AttachedPR{Owner: repo.Owner, Repo: repo.Name, Number: raw.Number, URL: raw.URL, Title: raw.Title, AuthorLogin: raw.Author.Login, HeadRef: raw.HeadRefName, BaseRef: raw.BaseRefName, HeadOID: raw.HeadRefOID, Status: status}, nil
 }
 
 type Repo struct {

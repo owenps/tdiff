@@ -14,6 +14,20 @@ func (f fakeRunner) Run(_ context.Context, _ string, args ...string) ([]byte, er
 	return []byte(f[key]), nil
 }
 
+func TestPRViewParsesStatus(t *testing.T) {
+	client := Client{Runner: fakeRunner{
+		"pr view --json " + prViewFields: `{"number":12,"title":"GitHub sync","url":"https://github.com/o/r/pull/12","headRefName":"gh","baseRefName":"main","headRefOid":"abc","isDraft":false,"state":"OPEN","mergeable":"MERGEABLE","reviewDecision":"APPROVED","statusCheckRollup":[{"conclusion":"SUCCESS","status":"COMPLETED"}],"author":{"login":"owenps"}}`,
+		"repo view --json owner,name":    `{"name":"r","owner":{"login":"o"}}`,
+	}}
+	pr, err := client.PRView(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr.Number != 12 || pr.Owner != "o" || pr.Repo != "r" || pr.Status != PRStatusReady {
+		t.Fatalf("bad pr: %#v", pr)
+	}
+}
+
 func TestPRListParsesGhOutput(t *testing.T) {
 	client := Client{Runner: fakeRunner{
 		"pr list --state open --json number,title,url,author,headRefName,baseRefName,headRefOid,isDraft,updatedAt --limit 30": `[{"number":12,"title":"GitHub sync","url":"https://github.com/o/r/pull/12","headRefName":"gh","baseRefName":"main","headRefOid":"abc","isDraft":true,"updatedAt":"2026-01-02T03:04:05Z","author":{"login":"owenps"}}]`,

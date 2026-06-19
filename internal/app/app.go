@@ -37,6 +37,7 @@ type Model struct {
 	width  int
 	height int
 
+	loadingFrame        int
 	pendingKey          string
 	jumpPrompt          bool
 	jumpInput           string
@@ -80,11 +81,27 @@ func New(ctx context.Context, cfg Config) (Model, error) {
 	return m, nil
 }
 
-func (m Model) Init() tea.Cmd { return textarea.Blink }
+func (m Model) Init() tea.Cmd {
+	return tea.Batch(textarea.Blink, loadingSpinnerTick())
+}
 
 type clearStatusMsg struct{ id int }
+type loadingSpinnerTickMsg struct{}
+
+func loadingSpinnerTick() tea.Cmd {
+	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
+		return loadingSpinnerTickMsg{}
+	})
+}
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if _, ok := msg.(loadingSpinnerTickMsg); ok {
+		if !m.ready() {
+			m.loadingFrame++
+			return m, loadingSpinnerTick()
+		}
+		return m, nil
+	}
 	if msg, ok := msg.(clearStatusMsg); ok {
 		if msg.id == m.statusID {
 			m.status = ""
@@ -328,6 +345,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) View() string {
+	if !m.ready() {
+		return m.loadingView()
+	}
 	if m.composing {
 		view := m.composerBaseView
 		if view == "" {
@@ -343,6 +363,15 @@ func (m Model) View() string {
 	return view
 }
 
+func (m Model) ready() bool {
+	return m.width > 0 && m.height > 0
+}
+
+func (m Model) loadingView() string {
+	frame := loadingSpinnerFrames[m.loadingFrame%len(loadingSpinnerFrames)]
+	return annotationStyle.Render(frame) + " " + dimStyle.Render("opening tdiff…")
+}
+
 func (m Model) reviewView() string {
 	if len(m.session.Files()) == 0 {
 		if len(m.session.AllFiles()) > 0 {
@@ -350,11 +379,6 @@ func (m Model) reviewView() string {
 		}
 		return dimStyle.Render("clean tree · nothing to review") + "\n"
 	}
-	if m.width == 0 {
-		m.width = 100
-		m.height = 30
-	}
-
 	bodyHeight := m.bodyHeight()
 	diffHeight := bodyHeight
 	var header string
@@ -708,10 +732,7 @@ func (m Model) renderSidebar(height int) string {
 	files := m.session.Files()
 	fileIdx := m.session.FileIndex()
 	nameW, addW, delW, annotationW := sidebarColumnWidths(files, m.annotationCount)
-	previewHeight := 0
-	if height >= 12 && m.totalAnnotationCount() > 0 {
-		previewHeight = min(7, height/3)
-	}
+	previewHeight := sidebarAnnotationHeight(height, m.totalAnnotationCount())
 	fileHeight := height - previewHeight
 	var rows []string
 	rows = append(rows, sidebarHeader(m.sidebarStatsView(m.totalStats()), m.annotationsView(m.totalAnnotationCount())))
@@ -746,6 +767,20 @@ func (m Model) renderSidebar(height int) string {
 		rows = append(rows, m.renderAnnotationPreview(previewHeight)...)
 	}
 	return style.Render(strings.Join(rows, "\n"))
+}
+
+func sidebarAnnotationHeight(height, annotationCount int) int {
+	if annotationCount == 0 || height < sidebarMinFileRows+sidebarMinAnnotationRows {
+		return 0
+	}
+	available := height - sidebarMinFileRows
+	if available < sidebarMinAnnotationRows {
+		return 0
+	}
+	desired := sidebarAnnotationHeaderRows + annotationCount*sidebarRowsPerAnnotation
+	desired = max(sidebarMinAnnotationRows, desired)
+	maxPreview := min(sidebarAnnotationMaxRows, height/2)
+	return min(maxPreview, min(available, desired))
 }
 
 func (m Model) annotationPositions() []review.AnnotationPosition {
@@ -959,16 +994,22 @@ func (m *Model) saveAnnotation() error {
 }
 
 const (
-	sidebarWidth          = 38
-	lineNoWidth           = 4
-	intralineContextLines = 200
-	syntaxMaxFileLines    = 2500
-	syntaxMaxLineWidth    = 500
-	syntaxCacheMaxEntries = 4000
-	statusToastDuration   = 3 * time.Second
+	sidebarWidth                = 38
+	sidebarMinFileRows          = 8
+	sidebarMinAnnotationRows    = 6
+	sidebarAnnotationMaxRows    = 24
+	sidebarAnnotationHeaderRows = 2
+	sidebarRowsPerAnnotation    = 2
+	lineNoWidth                 = 4
+	intralineContextLines       = 200
+	syntaxMaxFileLines          = 2500
+	syntaxMaxLineWidth          = 500
+	syntaxCacheMaxEntries       = 4000
+	statusToastDuration         = 3 * time.Second
 )
 
 var (
+	loadingSpinnerFrames    = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 	brandColor              = lipgloss.Color("180")
 	selectedBg              = lipgloss.Color("236")
 	addChangedBg            = lipgloss.Color("22")

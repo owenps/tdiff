@@ -33,6 +33,7 @@ Toggle syntax on and off with <kbd>x</kbd>.
 
 ```sh
 go install github.com/owenps/tdiff@latest
+tdiff
 ```
 
 Default view shows branch changes plus staged/unstaged/untracked working tree changes.

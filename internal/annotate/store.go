@@ -51,19 +51,13 @@ func Open(gitRoot string) (*Store, error) {
 		return nil, err
 	}
 	path := filepath.Join(gitDir, "tdiff", "annotations.json")
-	legacyPath := filepath.Join(gitDir, "tdiff", "notes.json")
 	store := &Store{path: path}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			b, err = os.ReadFile(legacyPath)
-			if os.IsNotExist(err) {
-				return store, nil
-			}
+			return store, nil
 		}
-		if err != nil {
-			return nil, err
-		}
+		return nil, err
 	}
 	if err := decodeStore(b, store); err != nil {
 		return nil, err
@@ -75,16 +69,12 @@ func Open(gitRoot string) (*Store, error) {
 func decodeStore(b []byte, store *Store) error {
 	var payload struct {
 		Annotations []Annotation `json:"annotations"`
-		LegacyNotes []Annotation `json:"notes"`
 		Viewed      []ViewedFile `json:"viewed"`
 	}
 	if err := json.Unmarshal(b, &payload); err != nil {
 		return err
 	}
 	store.Annotations = payload.Annotations
-	if len(store.Annotations) == 0 {
-		store.Annotations = payload.LegacyNotes
-	}
 	store.Viewed = payload.Viewed
 	return nil
 }

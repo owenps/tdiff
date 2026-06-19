@@ -10,12 +10,13 @@ import (
 )
 
 type prPicker struct {
-	active     bool
-	loading    bool
-	err        string
-	input      string
-	index      int
-	candidates []gh.PullRequest
+	active         bool
+	loading        bool
+	err            string
+	input          string
+	index          int
+	attachedNumber int
+	candidates     []gh.PullRequest
 }
 
 func (p prPicker) Active() bool  { return p.active }
@@ -39,6 +40,7 @@ func (p *prPicker) Close() {
 
 func (p *prPicker) SetLoaded(prs []gh.PullRequest, err error, attachedNumber int) {
 	p.loading = false
+	p.attachedNumber = attachedNumber
 	p.candidates = prs
 	if err != nil {
 		p.err = "PR list failed; type number"
@@ -157,7 +159,11 @@ func (p prPicker) View(width, loadingFrame int) string {
 			if pr.IsDraft {
 				draft = " draft"
 			}
-			line := fmt.Sprintf("%s#%d %s  %s  %s%s", prefix, pr.Number, truncate(pr.Title, max(10, w-36)), pr.AuthorLogin, pr.HeadRef, draft)
+			current := ""
+			if p.attachedNumber == pr.Number {
+				current = " current"
+			}
+			line := fmt.Sprintf("%s#%d %s  %s  %s%s%s", prefix, pr.Number, truncate(pr.Title, max(10, w-44)), pr.AuthorLogin, pr.HeadRef, draft, current)
 			rows = append(rows, style.Render(truncate(line, w)))
 		}
 	}

@@ -842,6 +842,10 @@ func (m Model) updatePRPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if !attach {
 		return m, nil
 	}
+	if m.store != nil && m.store.GitHub != nil && m.store.GitHub.Number == number {
+		m.status = fmt.Sprintf("PR #%d already attached", number)
+		return m, m.statusToastCmd(previousStatus)
+	}
 	m.prAttaching = true
 	m.status = fmt.Sprintf("attaching PR #%d…", number)
 	return m, tea.Batch(attachPRCmd(m.repo.Root, number), loadingSpinnerTick())
@@ -1177,7 +1181,7 @@ func (m Model) footerHints() string {
 	if _, ok := m.selectedAnnotation(); ok {
 		return "e edit · d delete · ]a/[a annotations · y copy"
 	}
-	return "a annotate · r range · v viewed · # PR · ? help"
+	return "a annotate · r range · v viewed · ? help"
 }
 
 func (m Model) renderHelp() string {

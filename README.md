@@ -2,7 +2,9 @@
 
 [![Tests](https://github.com/owenps/tdiff/actions/workflows/tests.yml/badge.svg)](https://github.com/owenps/tdiff/actions/workflows/tests.yml)
 
-Fast local diff review with annotations for humans + agents.
+Review changes like a PR, without leaving terminal. tdiff is a fast local diff review with annotations for humans + agents.
+
+Export annotations as markdown for whereever you run your agents: Claude, Codex, Pi, etc.
 
 ![tdiff main review UI](docs/assets/screenshots/main-ui.png)
 
@@ -44,6 +46,16 @@ tdiff --unstaged
 tdiff export
 ```
 
+## Data
+
+tdiff stores review data locally in your repo:
+
+```sh
+.git/tdiff/annotations.json
+```
+
+This includes annotations and viewed-file state.
+
 ## Keybinds
 
 - <kbd>?</kbd> show/hide keybind help modal
@@ -78,4 +90,3 @@ tdiff export
 ```sh
 go run .
 ```
-

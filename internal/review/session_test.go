@@ -3,11 +3,18 @@ package review
 import (
 	"testing"
 
+	"github.com/owenps/tdiff/internal/annotate"
 	"github.com/owenps/tdiff/internal/diff"
 )
 
 type fakeViewedStore struct {
 	viewed map[string]string
+}
+
+type fakeAnnotationStore map[string][]annotate.Annotation
+
+func (s fakeAnnotationStore) AnnotationsFor(path string) []annotate.Annotation {
+	return s[path]
 }
 
 func (s *fakeViewedStore) MarkViewed(path, diffHash string) error {
@@ -30,15 +37,7 @@ func (s *fakeViewedStore) IsViewed(path, diffHash string) bool {
 func TestSessionFiltersSnapshotFiles(t *testing.T) {
 	s := NewSession(nil)
 	viewed := &fakeViewedStore{viewed: map[string]string{"a.go": "hash"}}
-	s.SetFilterSources(
-		viewed,
-		func(path string) int {
-			if path == "b.go" {
-				return 1
-			}
-			return 0
-		},
-	)
+	s.SetStores(viewed, fakeAnnotationStore{"b.go": []annotate.Annotation{{Path: "b.go", Side: annotate.SideNew, LineStart: 1, LineEnd: 1}}})
 	s.SetSnapshot([]diff.File{{NewPath: "a.go"}, {NewPath: "b.go"}, {NewPath: "c.go"}}, "hash")
 	s.SetFilters(true, true)
 
@@ -54,17 +53,48 @@ func TestSessionFiltersSnapshotFiles(t *testing.T) {
 func TestSessionAdvanceToNextUnviewed(t *testing.T) {
 	s := NewSession([]diff.File{{NewPath: "a.go"}, {NewPath: "b.go"}})
 	s.SetSnapshot(s.AllFiles(), "hash")
-	s.SetFilterSources(&fakeViewedStore{viewed: map[string]string{"a.go": "hash"}}, nil)
+	s.SetStores(&fakeViewedStore{viewed: map[string]string{"a.go": "hash"}}, nil)
 
 	if !s.AdvanceToNextUnviewed() || s.CurrentPath() != "b.go" {
 		t.Fatalf("path=%q", s.CurrentPath())
 	}
 }
 
+func TestSessionLineWindowOwnsRangeGlyphs(t *testing.T) {
+	s := NewSession([]diff.File{{NewPath: "a.go", Hunks: []diff.Hunk{{Header: "@@", Lines: []diff.Line{
+		{Kind: diff.Delete, OldNo: 1, Text: "-old"},
+		{Kind: diff.Add, NewNo: 1, Text: "+new"},
+	}}}}})
+	s.MoveLine(1, 10)
+	if result := s.ToggleRange(); !result.Started {
+		t.Fatalf("range toggle=%+v", result)
+	}
+	s.MoveLine(1, 10)
+
+	window := s.LineWindow(10)
+	if !window.RangeActive || !window.InActiveRange(1) || !window.InActiveRange(2) || window.InActiveRange(0) {
+		t.Fatalf("window range=%+v", window)
+	}
+	if window.RangeGlyph(1) != "╭" || window.RangeGlyph(2) != "╰" {
+		t.Fatalf("glyphs=%q/%q", window.RangeGlyph(1), window.RangeGlyph(2))
+	}
+}
+
+func TestSessionSelectedAnnotationUsesStore(t *testing.T) {
+	s := NewSession([]diff.File{{NewPath: "a.go", Hunks: []diff.Hunk{{Header: "@@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 7, Text: "+new"}}}}}})
+	s.SetStores(nil, fakeAnnotationStore{"a.go": []annotate.Annotation{{ID: "n1", Path: "a.go", Side: annotate.SideNew, LineStart: 7, LineEnd: 7}}})
+	s.MoveLine(1, 10)
+
+	annotation, ok := s.SelectedAnnotation()
+	if !ok || annotation.ID != "n1" {
+		t.Fatalf("annotation=%+v ok=%t", annotation, ok)
+	}
+}
+
 func TestSessionToggleViewedOwnsFilteringAndAdvance(t *testing.T) {
 	store := &fakeViewedStore{}
 	s := NewSession([]diff.File{{NewPath: "a.go"}, {NewPath: "b.go"}})
-	s.SetFilterSources(store, nil)
+	s.SetStores(store, nil)
 	s.SetSnapshot(s.AllFiles(), "hash")
 
 	result, err := s.ToggleViewed()

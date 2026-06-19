@@ -24,7 +24,7 @@ type diffPane struct {
 	contextDim      bool
 	wrapCursorLine  bool
 	syntaxCache     map[string]string
-	cursor          review.Cursor
+	session         review.Session
 	workflow        annotations.Workflow
 	fileAnnotations []annotate.Annotation
 }
@@ -51,7 +51,7 @@ func (m Model) diffPane(width int) diffPane {
 		contextDim:      m.contextDim,
 		wrapCursorLine:  m.wrapCursorLine,
 		syntaxCache:     m.syntaxCache,
-		cursor:          m.session.Cursor(),
+		session:         m.session,
 		workflow:        m.annotations,
 		fileAnnotations: fileAnnotations,
 	}
@@ -66,13 +66,13 @@ func (p diffPane) Render(height int) string {
 		return p.renderSplit(height)
 	}
 	style := lipgloss.NewStyle().Width(p.width)
-	lineCount := p.cursor.CurrentLineCount()
-	lineIdx := p.cursor.LineIndex()
-	start := clamp(p.cursor.DiffOffset(), 0, max(0, lineCount-height))
-	end := min(lineCount, start+height)
-	lines := p.cursor.CurrentLinesRange(start, end)
+	window := p.session.LineWindow(height)
+	lineCount := window.LineCount
+	lineIdx := window.LineIndex
+	start := window.Start
+	lines := window.Lines
 	syntaxOK := p.syntaxAllowed(lineCount)
-	intraline := p.intralinePairs(max(0, start-intralineContextLines), min(lineCount, end+intralineContextLines))
+	intraline := p.intralinePairs(max(0, window.Start-intralineContextLines), min(lineCount, window.End+intralineContextLines))
 
 	var rows []string
 	for offset, dl := range lines {
@@ -105,10 +105,10 @@ type splitRow struct {
 
 func (p diffPane) renderSplit(height int) string {
 	style := lipgloss.NewStyle().Width(p.width)
-	lineCount := p.cursor.CurrentLineCount()
-	start := clamp(p.cursor.DiffOffset(), 0, max(0, lineCount-height))
-	end := min(lineCount, start+height)
-	lines := p.cursor.CurrentLinesRange(start, end)
+	window := p.session.LineWindow(height)
+	lineCount := window.LineCount
+	start := window.Start
+	lines := window.Lines
 	syntaxOK := p.syntaxAllowed(lineCount)
 	rows := p.splitRows(lines, start)
 	if len(rows) > height {
@@ -118,7 +118,7 @@ func (p diffPane) renderSplit(height int) string {
 	var out []string
 	for _, row := range rows {
 		line := p.formatSplitRow(row, syntaxOK)
-		selected := row.oldIdx == p.cursor.LineIndex() || row.newIdx == p.cursor.LineIndex()
+		selected := row.oldIdx == window.LineIndex || row.newIdx == window.LineIndex
 		inRange := (row.oldIdx >= 0 && p.inActiveRange(row.oldIdx)) || (row.newIdx >= 0 && p.inActiveRange(row.newIdx))
 		if !selected {
 			if inRange {
@@ -133,7 +133,7 @@ func (p diffPane) renderSplit(height int) string {
 }
 
 func (p diffPane) intralinePairs(start, end int) map[int]string {
-	lines := p.cursor.CurrentLinesRange(start, end)
+	lines := p.session.LineWindowRange(start, end).Lines
 	pairs := make(map[int]string)
 	for i := 0; i < len(lines); i++ {
 		if lines[i].Line == nil || lines[i].Line.Kind != diff.Delete {
@@ -249,7 +249,7 @@ func (p diffPane) formatLine(dl displayLine, selected, inRange bool, rangeGlyph 
 func (p diffPane) formatSplitRow(row splitRow, syntaxOK bool) string {
 	if row.hunk != "" {
 		text := truncate(row.hunk, p.width)
-		if row.oldIdx == p.cursor.LineIndex() || row.newIdx == p.cursor.LineIndex() {
+		if row.oldIdx == p.session.LineIndex() || row.newIdx == p.session.LineIndex() {
 			return padRightStyled(selectedHunkStyle.Render(text), p.width, selectedStyle)
 		}
 		if (row.oldIdx >= 0 && p.inActiveRange(row.oldIdx)) || (row.newIdx >= 0 && p.inActiveRange(row.newIdx)) {
@@ -257,14 +257,14 @@ func (p diffPane) formatSplitRow(row splitRow, syntaxOK bool) string {
 		}
 		return hunkStyle.Render(text)
 	}
-	selected := row.oldIdx == p.cursor.LineIndex() || row.newIdx == p.cursor.LineIndex()
+	selected := row.oldIdx == p.session.LineIndex() || row.newIdx == p.session.LineIndex()
 	inRange := (row.oldIdx >= 0 && p.inActiveRange(row.oldIdx)) || (row.newIdx >= 0 && p.inActiveRange(row.newIdx))
 	glyphIdx := row.oldIdx
 	if glyphIdx < 0 {
 		glyphIdx = row.newIdx
 	}
 	if selected {
-		glyphIdx = p.cursor.LineIndex()
+		glyphIdx = p.session.LineIndex()
 	}
 	rangeGlyph := p.rangeGlyph(glyphIdx)
 	marker := p.splitRowMarker(row)
@@ -607,20 +607,7 @@ func (p diffPane) syntaxView(s string) string {
 }
 
 func (p diffPane) rangeGlyph(idx int) string {
-	if !p.cursor.RangeActive() || !p.cursor.InActiveRange(idx) {
-		return " "
-	}
-	start, end := p.cursor.RangeIndexes()
-	if start == end {
-		return "╭"
-	}
-	if idx == start {
-		return "╭"
-	}
-	if idx == end {
-		return "╰"
-	}
-	return "│"
+	return p.session.RangeGlyph(idx)
 }
 
 func railGlyph(annotationMarker, rangeGlyph string) string {
@@ -660,5 +647,5 @@ func railPrefix(glyph string) string {
 }
 
 func (p diffPane) inActiveRange(idx int) bool {
-	return p.cursor.InActiveRange(idx)
+	return p.session.InActiveRange(idx)
 }

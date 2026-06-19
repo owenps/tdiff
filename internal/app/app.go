@@ -73,8 +73,7 @@ func New(ctx context.Context, cfg Config) (Model, error) {
 		return Model{}, err
 	}
 	m := Model{repo: repo, cfg: cfg, store: store, annotations: annotations.NewWorkflow(store), session: review.NewSession(nil), syntax: true, contextDim: true, syntaxCache: make(map[string]string)}
-	m.session.SetFilterSources(store, m.annotationCount)
-	m.session.SetAnnotationSources(store.AnnotationsFor, m.annotations.AnnotationAt)
+	m.session.SetStores(store, store)
 	m.editor = textarea.New()
 	m.editor.Placeholder = "annotation"
 	m.editor.CharLimit = 4000
@@ -377,10 +376,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "r":
 			m.pendingKey = ""
-			if m.session.RangeActive() {
-				m.session.CancelRange()
+			result := m.session.ToggleRange()
+			if result.Cancelled {
 				m.status = "range cancelled"
-			} else if m.session.StartRange() {
+			} else if result.Started {
 				m.status = "range started; move then press a"
 			} else {
 				m.status = "range must start on a diff line"
@@ -716,10 +715,7 @@ func sidebarStat(prefix string, count int) string {
 }
 
 func (m Model) annotationCount(path string) int {
-	if m.store == nil {
-		return 0
-	}
-	return len(m.store.AnnotationsFor(path))
+	return m.session.AnnotationCount(path)
 }
 
 func (m Model) totalAnnotationCount() int {

@@ -54,8 +54,7 @@ func TestRenderSidebarGivesAnnotationsMoreRoomWhenScreenPermits(t *testing.T) {
 	store := &annotate.Store{Annotations: notes}
 	workflow := annotations.NewWorkflow(store)
 	session := review.NewSession(files)
-	session.SetFilterSources(store, func(path string) int { return len(store.AnnotationsFor(path)) })
-	session.SetAnnotationSources(store.AnnotationsFor, workflow.AnnotationAt)
+	session.SetStores(store, store)
 	m := Model{store: store, annotations: workflow, session: session, width: 100}
 
 	out := xansi.Strip(m.renderSidebar(30))

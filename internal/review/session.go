@@ -13,10 +13,48 @@ type ViewedStore interface {
 	IsViewed(path, diffHash string) bool
 }
 
+type AnnotationStore interface {
+	AnnotationsFor(path string) []annotate.Annotation
+}
+
 type ViewedToggleResult struct {
 	Path     string
 	Viewed   bool
 	Advanced bool
+}
+
+type RangeToggleResult struct {
+	Started   bool
+	Cancelled bool
+}
+
+type LineWindow struct {
+	Path        string
+	Lines       []DisplayLine
+	Start       int
+	End         int
+	LineCount   int
+	LineIndex   int
+	RangeActive bool
+	RangeStart  int
+	RangeEnd    int
+}
+
+func (w LineWindow) InActiveRange(idx int) bool {
+	return w.RangeActive && w.RangeStart <= idx && idx <= w.RangeEnd
+}
+
+func (w LineWindow) RangeGlyph(idx int) string {
+	if !w.InActiveRange(idx) {
+		return " "
+	}
+	if w.RangeStart == w.RangeEnd || idx == w.RangeStart {
+		return "╭"
+	}
+	if idx == w.RangeEnd {
+		return "╰"
+	}
+	return "│"
 }
 
 type Session struct {
@@ -24,12 +62,10 @@ type Session struct {
 	diffHash string
 	cursor   Cursor
 
-	hideViewed         bool
-	annotationsOnly    bool
-	viewed             ViewedStore
-	annotationCount    func(path string) int
-	annotationsForPath func(path string) []annotate.Annotation
-	annotationAt       func(path string, line diff.Line) (annotate.Annotation, bool)
+	hideViewed      bool
+	annotationsOnly bool
+	viewed          ViewedStore
+	annotations     AnnotationStore
 }
 
 func NewSession(files []diff.File) Session {
@@ -42,15 +78,10 @@ func (s *Session) SetSnapshot(files []diff.File, diffHash string) {
 	s.applyFilters()
 }
 
-func (s *Session) SetFilterSources(viewed ViewedStore, annotationCount func(path string) int) {
+func (s *Session) SetStores(viewed ViewedStore, annotations AnnotationStore) {
 	s.viewed = viewed
-	s.annotationCount = annotationCount
+	s.annotations = annotations
 	s.applyFilters()
-}
-
-func (s *Session) SetAnnotationSources(annotationsForPath func(string) []annotate.Annotation, annotationAt func(string, diff.Line) (annotate.Annotation, bool)) {
-	s.annotationsForPath = annotationsForPath
-	s.annotationAt = annotationAt
 }
 
 func (s *Session) SetFilters(hideViewed, annotationsOnly bool) {
@@ -84,18 +115,21 @@ func (s *Session) applyFilters() {
 	if s.viewed != nil {
 		isViewed = s.viewed.IsViewed
 	}
+	var annotationCount func(path string) int
+	if s.annotations != nil {
+		annotationCount = s.AnnotationCount
+	}
 	s.cursor.SetFilteredFiles(s.allFiles, FileFilter{
 		HideViewed:      s.hideViewed,
 		AnnotationsOnly: s.annotationsOnly,
 		DiffHash:        s.diffHash,
 		IsViewed:        isViewed,
-		AnnotationCount: s.annotationCount,
+		AnnotationCount: annotationCount,
 	})
 }
 
 func (s Session) AllFiles() []diff.File { return s.allFiles }
 func (s Session) DiffHash() string      { return s.diffHash }
-func (s Session) Cursor() Cursor        { return s.cursor }
 
 func (s Session) Files() []diff.File { return s.cursor.Files() }
 func (s Session) FileIndex() int     { return s.cursor.FileIndex() }
@@ -114,6 +148,34 @@ func (s Session) CurrentPath() string                  { return s.cursor.Current
 func (s Session) RangeIndexes() (int, int)             { return s.cursor.RangeIndexes() }
 func (s Session) RangeLines() []DisplayLine            { return s.cursor.RangeLines() }
 
+func (s Session) LineWindow(height int) LineWindow {
+	lineCount := s.CurrentLineCount()
+	start := clamp(s.DiffOffset(), 0, max(0, lineCount-height))
+	end := min(lineCount, start+height)
+	return s.LineWindowRange(start, end)
+}
+
+func (s Session) LineWindowRange(start, end int) LineWindow {
+	lineCount := s.CurrentLineCount()
+	start = clamp(start, 0, lineCount)
+	end = clamp(end, start, lineCount)
+	rangeStart, rangeEnd := 0, 0
+	if s.RangeActive() {
+		rangeStart, rangeEnd = s.RangeIndexes()
+	}
+	return LineWindow{
+		Path:        s.CurrentPath(),
+		Lines:       s.CurrentLinesRange(start, end),
+		Start:       start,
+		End:         end,
+		LineCount:   lineCount,
+		LineIndex:   s.LineIndex(),
+		RangeActive: s.RangeActive(),
+		RangeStart:  rangeStart,
+		RangeEnd:    rangeEnd,
+	}
+}
+
 func (s *Session) MoveLine(delta, height int) { s.cursor.MoveLine(delta, height) }
 func (s *Session) MoveFile(delta int)         { s.cursor.MoveFile(delta) }
 func (s *Session) JumpTop()                   { s.cursor.JumpTop() }
@@ -126,15 +188,41 @@ func (s *Session) JumpToFileLine(line, height int) bool {
 func (s *Session) JumpToIndex(fileIdx, lineIdx, height int) bool {
 	return s.cursor.JumpToIndex(fileIdx, lineIdx, height)
 }
-func (s *Session) EnsureVisible(height int)  { s.cursor.EnsureVisible(height) }
-func (s *Session) StartRange() bool          { return s.cursor.StartRange() }
-func (s *Session) CancelRange()              { s.cursor.CancelRange() }
-func (s Session) InActiveRange(idx int) bool { return s.cursor.InActiveRange(idx) }
+func (s *Session) EnsureVisible(height int) { s.cursor.EnsureVisible(height) }
+func (s *Session) StartRange() bool         { return s.cursor.StartRange() }
+func (s *Session) CancelRange()             { s.cursor.CancelRange() }
+func (s Session) InActiveRange(idx int) bool {
+	return s.cursor.InActiveRange(idx)
+}
+func (s Session) RangeGlyph(idx int) string {
+	rangeStart, rangeEnd := 0, 0
+	if s.RangeActive() {
+		rangeStart, rangeEnd = s.RangeIndexes()
+	}
+	return LineWindow{RangeActive: s.RangeActive(), RangeStart: rangeStart, RangeEnd: rangeEnd}.RangeGlyph(idx)
+}
+func (s *Session) ToggleRange() RangeToggleResult {
+	if s.RangeActive() {
+		s.CancelRange()
+		return RangeToggleResult{Cancelled: true}
+	}
+	if s.StartRange() {
+		return RangeToggleResult{Started: true}
+	}
+	return RangeToggleResult{}
+}
 func (s *Session) AdvanceToNextFile(matches func(diff.File) bool) bool {
 	return s.cursor.AdvanceToNextFile(matches)
 }
 func (s Session) IsViewed(path string) bool {
 	return s.viewed != nil && s.viewed.IsViewed(path, s.diffHash)
+}
+
+func (s Session) AnnotationCount(path string) int {
+	if s.annotations == nil {
+		return 0
+	}
+	return len(s.annotations.AnnotationsFor(path))
 }
 
 func (s *Session) ToggleViewed() (ViewedToggleResult, error) {
@@ -170,17 +258,50 @@ func (s *Session) AdvanceToNextUnviewed() bool {
 	})
 }
 func (s Session) AnnotationPositions() []AnnotationPosition {
-	if s.annotationsForPath == nil {
+	if s.annotations == nil {
 		return nil
 	}
-	return s.cursor.AnnotationPositions(s.annotationsForPath)
+	return s.cursor.AnnotationPositions(s.annotations.AnnotationsFor)
 }
 func (s *Session) JumpAnnotation(delta, height int) (int, int, bool) {
-	if s.annotationsForPath == nil {
+	if s.annotations == nil {
 		return 0, 0, false
 	}
-	return s.cursor.JumpAnnotation(delta, height, s.annotationsForPath)
+	return s.cursor.JumpAnnotation(delta, height, s.annotations.AnnotationsFor)
 }
 func (s Session) SelectedAnnotation() (annotate.Annotation, bool) {
-	return s.cursor.SelectedAnnotation(s.annotationAt)
+	if s.annotations == nil {
+		return annotate.Annotation{}, false
+	}
+	dl := s.SelectedLine()
+	if dl.Line == nil {
+		return annotate.Annotation{}, false
+	}
+	return AnnotationAtLine(s.annotations.AnnotationsFor(s.CurrentPath()), *dl.Line)
+}
+
+func AnnotationAtLine(annotations []annotate.Annotation, line diff.Line) (annotate.Annotation, bool) {
+	side, lineNo, ok := lineTarget(line)
+	if !ok {
+		return annotate.Annotation{}, false
+	}
+	for _, n := range annotations {
+		if n.Side == side && n.LineStart <= lineNo && lineNo <= n.LineEnd {
+			return n, true
+		}
+	}
+	return annotate.Annotation{}, false
+}
+
+func lineTarget(l diff.Line) (annotate.Side, int, bool) {
+	if l.Kind == diff.Delete {
+		return annotate.SideOld, l.OldNo, l.OldNo > 0
+	}
+	if l.NewNo > 0 {
+		return annotate.SideNew, l.NewNo, true
+	}
+	if l.OldNo > 0 {
+		return annotate.SideOld, l.OldNo, true
+	}
+	return annotate.SideNew, 0, false
 }

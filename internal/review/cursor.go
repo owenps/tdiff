@@ -13,6 +13,7 @@ type DisplayLine struct {
 
 type Cursor struct {
 	files         []diff.File
+	displayLines  [][]DisplayLine
 	fileIdx       int
 	lineIdx       int
 	diffOffset    int
@@ -21,11 +22,14 @@ type Cursor struct {
 }
 
 func NewCursor(files []diff.File) Cursor {
-	return Cursor{files: files}
+	c := Cursor{}
+	c.SetFiles(files)
+	return c
 }
 
 func (c *Cursor) SetFiles(files []diff.File) {
 	c.files = files
+	c.displayLines = displayLinesForFiles(c.files)
 	if c.fileIdx >= len(c.files) {
 		c.fileIdx = max(0, len(c.files)-1)
 	}
@@ -68,55 +72,29 @@ func (c Cursor) DiffOffset() int    { return c.diffOffset }
 func (c Cursor) RangeActive() bool  { return c.rangeActive }
 
 func (c Cursor) CurrentLines() []DisplayLine {
-	return c.CurrentLinesRange(0, c.CurrentLineCount())
+	return c.currentDisplayLines()
 }
 
 func (c Cursor) CurrentLineCount() int {
-	if len(c.files) == 0 || c.fileIdx >= len(c.files) {
-		return 0
-	}
-	count := 0
-	for _, h := range c.files[c.fileIdx].Hunks {
-		count += 1 + len(h.Lines)
-	}
-	return count
+	return len(c.currentDisplayLines())
 }
 
 func (c Cursor) CurrentLinesRange(start, end int) []DisplayLine {
-	if len(c.files) == 0 || c.fileIdx >= len(c.files) || start >= end {
+	lines := c.currentDisplayLines()
+	if len(lines) == 0 || start >= end {
 		return nil
 	}
-	if start < 0 {
-		start = 0
-	}
-	idx := 0
-	out := make([]DisplayLine, 0, end-start)
-	for _, h := range c.files[c.fileIdx].Hunks {
-		header := h.Header
-		if start <= idx && idx < end {
-			out = append(out, DisplayLine{Text: header, HunkHeader: header})
-		}
-		idx++
-		for i := range h.Lines {
-			if idx >= end {
-				return out
-			}
-			if idx >= start {
-				line := h.Lines[i]
-				out = append(out, DisplayLine{Line: &line, Text: line.Text, HunkHeader: header})
-			}
-			idx++
-		}
-	}
-	return out
+	start = clamp(start, 0, len(lines))
+	end = clamp(end, start, len(lines))
+	return lines[start:end]
 }
 
 func (c Cursor) DisplayLineAt(target int) DisplayLine {
-	lines := c.CurrentLinesRange(target, target+1)
-	if len(lines) == 0 {
+	lines := c.currentDisplayLines()
+	if target < 0 || target >= len(lines) {
 		return DisplayLine{}
 	}
-	return lines[0]
+	return lines[target]
 }
 
 func (c Cursor) SelectedLine() DisplayLine {
@@ -276,7 +254,7 @@ func (c Cursor) AnnotationPositions(annotationsForPath func(string) []annotate.A
 	var out []AnnotationPosition
 	for fileIdx, f := range c.files {
 		path := f.Path()
-		lines := DisplayLinesForFile(f)
+		lines := c.displayLinesForFileIndex(fileIdx)
 		for _, annotation := range annotationsForPath(path) {
 			for lineIdx, dl := range lines {
 				if dl.Line != nil && AnnotationMatchesLine(annotation, *dl.Line) {
@@ -329,13 +307,44 @@ func (c Cursor) SelectedAnnotation(annotationAt func(path string, line diff.Line
 }
 
 func DisplayLinesForFile(f diff.File) []DisplayLine {
-	var out []DisplayLine
+	return displayLinesForFile(&f)
+}
+
+func (c Cursor) currentDisplayLines() []DisplayLine {
+	if len(c.displayLines) == 0 || c.fileIdx < 0 || c.fileIdx >= len(c.displayLines) {
+		return nil
+	}
+	return c.displayLines[c.fileIdx]
+}
+
+func (c Cursor) displayLinesForFileIndex(fileIdx int) []DisplayLine {
+	if fileIdx < 0 || fileIdx >= len(c.displayLines) {
+		return nil
+	}
+	return c.displayLines[fileIdx]
+}
+
+func displayLinesForFiles(files []diff.File) [][]DisplayLine {
+	out := make([][]DisplayLine, len(files))
+	for i := range files {
+		out[i] = displayLinesForFile(&files[i])
+	}
+	return out
+}
+
+func displayLinesForFile(f *diff.File) []DisplayLine {
+	count := 0
 	for _, h := range f.Hunks {
+		count += 1 + len(h.Lines)
+	}
+	out := make([]DisplayLine, 0, count)
+	for hunkIdx := range f.Hunks {
+		h := &f.Hunks[hunkIdx]
 		header := h.Header
 		out = append(out, DisplayLine{Text: header, HunkHeader: header})
 		for i := range h.Lines {
-			line := h.Lines[i]
-			out = append(out, DisplayLine{Line: &line, Text: line.Text, HunkHeader: header})
+			line := &h.Lines[i]
+			out = append(out, DisplayLine{Line: line, Text: line.Text, HunkHeader: header})
 		}
 	}
 	return out

@@ -55,9 +55,13 @@ type Model struct {
 	pendingTarget       annotations.Target
 	editor              textarea.Model
 	prPicker            bool
+	prPickerLoading     bool
+	prPickerErr         string
 	prPickerInput       string
 	prPickerIndex       int
 	prCandidates        []gh.PullRequest
+	prAttaching         bool
+	refreshing          bool
 	status              string
 	statusID            int
 	composerBaseView    string
@@ -93,6 +97,26 @@ func (m Model) Init() tea.Cmd {
 
 type clearStatusMsg struct{ id int }
 type loadingSpinnerTickMsg struct{}
+type prListLoadedMsg struct {
+	prs []gh.PullRequest
+	err error
+}
+type prAttachLoadedMsg struct {
+	pr        gh.AttachedPR
+	threads   []gh.Thread
+	err       error
+	threadErr error
+}
+type refreshLoadedMsg struct {
+	snap          snapshot.Snapshot
+	compareTarget string
+	pr            *gh.AttachedPR
+	threads       []gh.Thread
+	err           error
+	threadErr     error
+	offline       bool
+	noPR          bool
+}
 
 func loadingSpinnerTick() tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
@@ -102,11 +126,91 @@ func loadingSpinnerTick() tea.Cmd {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if _, ok := msg.(loadingSpinnerTickMsg); ok {
-		if !m.ready() {
+		if !m.ready() || m.prPickerLoading || m.prAttaching || m.refreshing {
 			m.loadingFrame++
 			return m, loadingSpinnerTick()
 		}
 		return m, nil
+	}
+	if msg, ok := msg.(prListLoadedMsg); ok {
+		if !m.prPicker {
+			return m, nil
+		}
+		m.prPickerLoading = false
+		m.prCandidates = msg.prs
+		if msg.err != nil {
+			m.prPickerErr = "PR list failed; type number"
+		} else {
+			m.prPickerErr = ""
+			if m.store != nil && m.store.GitHub != nil {
+				for i, pr := range msg.prs {
+					if pr.Number == m.store.GitHub.Number {
+						m.prPickerIndex = i
+						break
+					}
+				}
+			}
+		}
+		return m, nil
+	}
+	if msg, ok := msg.(prAttachLoadedMsg); ok {
+		previousStatus := m.status
+		m.prAttaching = false
+		if msg.err != nil {
+			m.status = msg.err.Error()
+			return m, m.statusToastCmd(previousStatus)
+		}
+		if err := m.store.AttachGitHubPR(msg.pr); err != nil {
+			m.status = err.Error()
+			return m, m.statusToastCmd(previousStatus)
+		}
+		if msg.threadErr != nil {
+			m.status = fmt.Sprintf("attached PR #%d · sync failed", msg.pr.Number)
+			return m, m.statusToastCmd(previousStatus)
+		}
+		count, err := m.store.SyncGitHubAnnotations(msg.pr, msg.threads)
+		if err != nil {
+			m.status = err.Error()
+			return m, m.statusToastCmd(previousStatus)
+		}
+		m.session.RefreshFilters()
+		m.status = fmt.Sprintf("attached PR #%d · %d annotations", msg.pr.Number, count)
+		return m, m.statusToastCmd(previousStatus)
+	}
+	if msg, ok := msg.(refreshLoadedMsg); ok {
+		previousStatus := m.status
+		m.refreshing = false
+		if msg.err != nil {
+			m.status = msg.err.Error()
+			return m, m.statusToastCmd(previousStatus)
+		}
+		m.compareTarget = msg.compareTarget
+		m.session.SetSnapshot(msg.snap.Files, msg.snap.Hash)
+		m.syntaxCache = make(map[string]string)
+		if msg.offline {
+			m.status = "diff refreshed · offline"
+			return m, m.statusToastCmd(previousStatus)
+		}
+		if msg.noPR || msg.pr == nil {
+			m.status = "diff refreshed · no PR"
+			return m, m.statusToastCmd(previousStatus)
+		}
+		if err := m.store.AttachGitHubPR(*msg.pr); err != nil {
+			m.status = err.Error()
+			return m, m.statusToastCmd(previousStatus)
+		}
+		if msg.threadErr != nil {
+			m.status = "diff refreshed · github sync failed"
+			return m, m.statusToastCmd(previousStatus)
+		}
+		count, err := m.store.SyncGitHubAnnotations(*msg.pr, msg.threads)
+		if err != nil {
+			m.status = err.Error()
+			return m, m.statusToastCmd(previousStatus)
+		}
+		m.session.RefreshFilters()
+		m.status = fmt.Sprintf("PR #%d synced · %d annotations", msg.pr.Number, count)
+		return m, m.statusToastCmd(previousStatus)
 	}
 	if msg, ok := msg.(clearStatusMsg); ok {
 		if msg.id == m.statusID {
@@ -177,7 +281,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.jumpInput = ""
 		case "#":
 			m.pendingKey = ""
-			m.openPRPicker(context.Background())
+			return m, m.openPRPicker()
 		case "g":
 			if m.pendingKey == "g" {
 				m.pendingKey = ""
@@ -263,11 +367,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "R":
 			m.pendingKey = ""
-			if status, err := m.refreshProject(context.Background()); err != nil {
-				m.status = err.Error()
-			} else {
-				m.status = status
+			if m.refreshing {
+				m.status = "refreshing…"
+				break
 			}
+			m.refreshing = true
+			m.status = "refreshing…"
+			return m, tea.Batch(m.refreshProjectCmd(), loadingSpinnerTick())
 		case "v":
 			m.pendingKey = ""
 			result, err := m.session.ToggleViewed()
@@ -433,16 +539,20 @@ func (m *Model) reload(ctx context.Context) error {
 }
 
 func (m Model) resolveCompareTarget(ctx context.Context) (string, error) {
-	switch m.cfg.Mode {
+	return resolveCompareTarget(ctx, m.repo, m.cfg)
+}
+
+func resolveCompareTarget(ctx context.Context, repo git.Repo, cfg Config) (string, error) {
+	switch cfg.Mode {
 	case git.ModeStaged:
 		return "HEAD", nil
 	case git.ModeUnstaged:
 		return "staged", nil
 	}
-	if m.cfg.Base != "" {
-		return m.cfg.Base, nil
+	if cfg.Base != "" {
+		return cfg.Base, nil
 	}
-	base, err := m.repo.DefaultBase(ctx)
+	base, err := repo.DefaultBase(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -468,36 +578,45 @@ func (m Model) compareTargetLabel() string {
 	return "none"
 }
 
-func (m *Model) refreshProject(ctx context.Context) (string, error) {
-	if err := m.reload(ctx); err != nil {
-		return "", err
+func (m Model) refreshProjectCmd() tea.Cmd {
+	repo := m.repo
+	cfg := m.cfg
+	var existingPR *gh.AttachedPR
+	if m.store != nil && m.store.GitHub != nil {
+		pr := *m.store.GitHub
+		existingPR = &pr
 	}
-	status := "diff refreshed"
-	if m.cfg.Offline {
-		return status + " · offline", nil
-	}
-	client := gh.NewClient(m.repo.Root)
-	pr := m.store.GitHub
-	if pr == nil || pr.Number == 0 {
-		detected, err := client.AutoDetectPR(ctx)
+	return func() tea.Msg {
+		ctx := context.Background()
+		compareTarget, err := resolveCompareTarget(ctx, repo, cfg)
 		if err != nil {
-			return status + " · no PR", nil
+			return refreshLoadedMsg{err: err}
 		}
-		if err := m.store.AttachGitHubPR(detected); err != nil {
-			return "", err
+		snap, err := snapshot.Load(ctx, repo, git.DiffOptions{Mode: cfg.Mode, Base: cfg.Base, IgnoreWhitespace: cfg.IgnoreWhitespace})
+		if err != nil {
+			return refreshLoadedMsg{err: err}
 		}
-		pr = &detected
+		msg := refreshLoadedMsg{snap: snap, compareTarget: compareTarget}
+		if cfg.Offline {
+			msg.offline = true
+			return msg
+		}
+		client := gh.NewClient(repo.Root)
+		pr := existingPR
+		if pr == nil || pr.Number == 0 {
+			detected, err := client.AutoDetectPR(ctx)
+			if err != nil {
+				msg.noPR = true
+				return msg
+			}
+			pr = &detected
+		}
+		threads, threadErr := client.Threads(ctx, *pr)
+		msg.pr = pr
+		msg.threads = threads
+		msg.threadErr = threadErr
+		return msg
 	}
-	threads, err := client.Threads(ctx, *pr)
-	if err != nil {
-		return status + " · github sync failed", nil
-	}
-	count, err := m.store.SyncGitHubAnnotations(*pr, threads)
-	if err != nil {
-		return "", err
-	}
-	m.session.RefreshFilters()
-	return fmt.Sprintf("PR #%d synced · %d annotations", pr.Number, count), nil
 }
 
 type displayLine = review.DisplayLine
@@ -712,28 +831,24 @@ func sidebarPath(path string, width int, selected, viewed bool) string {
 	return dimStyle.Render(prefix) + base + pad
 }
 
-func (m *Model) openPRPicker(ctx context.Context) {
+func (m *Model) openPRPicker() tea.Cmd {
 	if m.cfg.Offline {
 		m.status = "offline mode"
-		return
+		return nil
 	}
-	prs, err := gh.NewClient(m.repo.Root).PRList(ctx)
 	m.prPicker = true
+	m.prPickerLoading = true
+	m.prPickerErr = ""
 	m.prPickerInput = ""
 	m.prPickerIndex = 0
-	m.prCandidates = prs
-	if err != nil {
-		m.status = "PR list failed; type number"
-		m.prCandidates = nil
-		return
-	}
-	if m.store != nil && m.store.GitHub != nil {
-		for i, pr := range prs {
-			if pr.Number == m.store.GitHub.Number {
-				m.prPickerIndex = i
-				break
-			}
-		}
+	m.prCandidates = nil
+	return tea.Batch(loadPRListCmd(m.repo.Root), loadingSpinnerTick())
+}
+
+func loadPRListCmd(root string) tea.Cmd {
+	return func() tea.Msg {
+		prs, err := gh.NewClient(root).PRList(context.Background())
+		return prListLoadedMsg{prs: prs, err: err}
 	}
 }
 
@@ -742,6 +857,8 @@ func (m Model) updatePRPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
 		m.prPicker = false
+		m.prPickerLoading = false
+		m.prPickerErr = ""
 		m.prPickerInput = ""
 		return m, nil
 	case "up", "k":
@@ -757,19 +874,18 @@ func (m Model) updatePRPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "enter":
-		pr, err := m.selectedPickerPR(context.Background())
-		m.prPicker = false
-		m.prPickerInput = ""
+		number, err := m.selectedPickerPRNumber()
 		if err != nil {
 			m.status = err.Error()
 			return m, m.statusToastCmd(previousStatus)
 		}
-		if status, err := m.attachAndSyncPR(context.Background(), pr); err != nil {
-			m.status = err.Error()
-		} else {
-			m.status = status
-		}
-		return m, m.statusToastCmd(previousStatus)
+		m.prPicker = false
+		m.prPickerLoading = false
+		m.prPickerErr = ""
+		m.prPickerInput = ""
+		m.prAttaching = true
+		m.status = fmt.Sprintf("attaching PR #%d…", number)
+		return m, tea.Batch(attachPRCmd(m.repo.Root, number), loadingSpinnerTick())
 	}
 	for _, r := range msg.Runes {
 		if r >= 32 && r != 127 {
@@ -780,23 +896,29 @@ func (m Model) updatePRPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) selectedPickerPR(ctx context.Context) (gh.AttachedPR, error) {
+func (m Model) selectedPickerPRNumber() (int, error) {
 	input := strings.TrimSpace(m.prPickerInput)
-	client := gh.NewClient(m.repo.Root)
 	if n, ok := parsePRNumber(input); ok {
-		return client.PRView(ctx, n)
+		return n, nil
 	}
 	filtered := m.filteredPRs()
 	if len(filtered) == 0 {
-		return gh.AttachedPR{}, fmt.Errorf("no PR selected")
+		return 0, fmt.Errorf("no PR selected")
 	}
 	idx := clamp(m.prPickerIndex, 0, len(filtered)-1)
-	repo, err := client.Repo(ctx)
-	if err != nil {
-		return gh.AttachedPR{}, err
+	return filtered[idx].Number, nil
+}
+
+func attachPRCmd(root string, number int) tea.Cmd {
+	return func() tea.Msg {
+		client := gh.NewClient(root)
+		pr, err := client.PRView(context.Background(), number)
+		if err != nil {
+			return prAttachLoadedMsg{err: err}
+		}
+		threads, threadErr := client.Threads(context.Background(), pr)
+		return prAttachLoadedMsg{pr: pr, threads: threads, threadErr: threadErr}
 	}
-	pr := filtered[idx]
-	return gh.AttachedPR{Owner: repo.Owner, Repo: repo.Name, Number: pr.Number, URL: pr.URL, Title: pr.Title, AuthorLogin: pr.AuthorLogin, HeadRef: pr.HeadRef, BaseRef: pr.BaseRef, HeadOID: pr.HeadOID}, nil
 }
 
 func parsePRNumber(input string) (int, bool) {
@@ -830,27 +952,16 @@ func (m Model) filteredPRs() []gh.PullRequest {
 	return out
 }
 
-func (m *Model) attachAndSyncPR(ctx context.Context, pr gh.AttachedPR) (string, error) {
-	if err := m.store.AttachGitHubPR(pr); err != nil {
-		return "", err
-	}
-	threads, err := gh.NewClient(m.repo.Root).Threads(ctx, pr)
-	if err != nil {
-		return fmt.Sprintf("attached PR #%d · sync failed", pr.Number), nil
-	}
-	count, err := m.store.SyncGitHubAnnotations(pr, threads)
-	if err != nil {
-		return "", err
-	}
-	m.session.RefreshFilters()
-	return fmt.Sprintf("attached PR #%d · %d annotations", pr.Number, count), nil
-}
-
 func (m Model) renderPRPicker() string {
 	filtered := m.filteredPRs()
 	w := max(20, m.width)
 	rows := []string{fmt.Sprintf("# attach PR: %s", m.prPickerInput)}
-	if len(filtered) == 0 {
+	if m.prPickerLoading {
+		frame := loadingSpinnerFrames[m.loadingFrame%len(loadingSpinnerFrames)]
+		rows = append(rows, dimStyle.Render(frame+" loading PRs…"))
+	} else if m.prPickerErr != "" {
+		rows = append(rows, errorStyle.Render("  "+m.prPickerErr))
+	} else if len(filtered) == 0 {
 		rows = append(rows, dimStyle.Render("  no matching PRs"))
 	} else {
 		limit := min(5, len(filtered))
@@ -1135,6 +1246,10 @@ func (m Model) renderStatus() string {
 	}
 	if !m.contextDim {
 		parts = append(parts, dimStyle.Render("context-dim-off"))
+	}
+	if m.refreshing {
+		frame := loadingSpinnerFrames[m.loadingFrame%len(loadingSpinnerFrames)]
+		parts = append(parts, dimStyle.Render(frame+" refreshing"))
 	}
 	if m.session.RangeActive() {
 		start, end := m.session.RangeIndexes()

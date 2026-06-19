@@ -16,6 +16,7 @@ import (
 	"github.com/owenps/tdiff/internal/annotations"
 	"github.com/owenps/tdiff/internal/diff"
 	"github.com/owenps/tdiff/internal/git"
+	gh "github.com/owenps/tdiff/internal/github"
 	"github.com/owenps/tdiff/internal/review"
 	"github.com/owenps/tdiff/internal/snapshot"
 )
@@ -24,13 +25,15 @@ type Config struct {
 	Base             string
 	Mode             git.Mode
 	IgnoreWhitespace bool
+	Offline          bool
 }
 
 type Model struct {
-	repo        git.Repo
-	cfg         Config
-	store       *annotate.Store
-	annotations annotations.Workflow
+	repo          git.Repo
+	cfg           Config
+	compareTarget string
+	store         *annotate.Store
+	annotations   annotations.Workflow
 
 	session review.Session
 
@@ -51,6 +54,10 @@ type Model struct {
 	editingAnnotationID string
 	pendingTarget       annotations.Target
 	editor              textarea.Model
+	prPicker            bool
+	prPickerInput       string
+	prPickerIndex       int
+	prCandidates        []gh.PullRequest
 	status              string
 	statusID            int
 	composerBaseView    string
@@ -150,6 +157,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.editor.SetWidth(max(20, msg.Width-32))
 		m.ensureCursorVisible()
 	case tea.KeyMsg:
+		if m.prPicker {
+			return m.updatePRPicker(msg)
+		}
 		if m.jumpPrompt {
 			return m.updateJumpPrompt(msg)
 		}
@@ -165,6 +175,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingKey = ""
 			m.jumpPrompt = true
 			m.jumpInput = ""
+		case "#":
+			m.pendingKey = ""
+			m.openPRPicker(context.Background())
 		case "g":
 			if m.pendingKey == "g" {
 				m.pendingKey = ""
@@ -250,10 +263,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "R":
 			m.pendingKey = ""
-			if err := m.reload(context.Background()); err != nil {
+			if status, err := m.refreshProject(context.Background()); err != nil {
 				m.status = err.Error()
 			} else {
-				m.status = "diff refreshed"
+				m.status = status
 			}
 		case "v":
 			m.pendingKey = ""
@@ -303,6 +316,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, textarea.Blink
 			}
 			if annotation, ok := m.selectedAnnotation(); ok {
+				if annotation.Source == annotate.SourceGitHub {
+					m.status = "github annotation readonly"
+					break
+				}
 				m.startEditAnnotation(annotation)
 				return m, textarea.Blink
 			}
@@ -313,6 +330,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "e":
 			m.pendingKey = ""
 			if annotation, ok := m.selectedAnnotation(); ok {
+				if annotation.Source == annotate.SourceGitHub {
+					m.status = "github annotation readonly"
+					break
+				}
 				m.startEditAnnotation(annotation)
 				return m, textarea.Blink
 			}
@@ -320,6 +341,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "d":
 			m.pendingKey = ""
 			if annotation, ok := m.selectedAnnotation(); ok {
+				if annotation.Source == annotate.SourceGitHub {
+					m.status = "github annotation readonly"
+					break
+				}
 				if err := m.annotations.Delete(annotation.ID); err != nil {
 					m.status = err.Error()
 				} else {
@@ -346,6 +371,9 @@ func (m Model) View() string {
 			view = m.reviewView()
 		}
 		return view + "\n" + m.editor.View() + "\n⌥+enter save · esc cancel"
+	}
+	if m.prPicker {
+		return m.reviewView() + "\n" + m.renderPRPicker()
 	}
 
 	view := m.reviewView()
@@ -390,13 +418,86 @@ func (m Model) reviewView() string {
 }
 
 func (m *Model) reload(ctx context.Context) error {
+	compareTarget, err := m.resolveCompareTarget(ctx)
+	if err != nil {
+		return err
+	}
 	s, err := snapshot.Load(ctx, m.repo, git.DiffOptions{Mode: m.cfg.Mode, Base: m.cfg.Base, IgnoreWhitespace: m.cfg.IgnoreWhitespace})
 	if err != nil {
 		return err
 	}
+	m.compareTarget = compareTarget
 	m.session.SetSnapshot(s.Files, s.Hash)
 	m.syntaxCache = make(map[string]string)
 	return nil
+}
+
+func (m Model) resolveCompareTarget(ctx context.Context) (string, error) {
+	switch m.cfg.Mode {
+	case git.ModeStaged:
+		return "HEAD", nil
+	case git.ModeUnstaged:
+		return "staged", nil
+	}
+	if m.cfg.Base != "" {
+		return m.cfg.Base, nil
+	}
+	base, err := m.repo.DefaultBase(ctx)
+	if err != nil {
+		return "", err
+	}
+	if base == "" {
+		return "none", nil
+	}
+	return base, nil
+}
+
+func (m Model) compareTargetLabel() string {
+	if m.compareTarget != "" {
+		return m.compareTarget
+	}
+	switch m.cfg.Mode {
+	case git.ModeStaged:
+		return "HEAD"
+	case git.ModeUnstaged:
+		return "staged"
+	}
+	if m.cfg.Base != "" {
+		return m.cfg.Base
+	}
+	return "none"
+}
+
+func (m *Model) refreshProject(ctx context.Context) (string, error) {
+	if err := m.reload(ctx); err != nil {
+		return "", err
+	}
+	status := "diff refreshed"
+	if m.cfg.Offline {
+		return status + " · offline", nil
+	}
+	client := gh.NewClient(m.repo.Root)
+	pr := m.store.GitHub
+	if pr == nil || pr.Number == 0 {
+		detected, err := client.AutoDetectPR(ctx)
+		if err != nil {
+			return status + " · no PR", nil
+		}
+		if err := m.store.AttachGitHubPR(detected); err != nil {
+			return "", err
+		}
+		pr = &detected
+	}
+	threads, err := client.Threads(ctx, *pr)
+	if err != nil {
+		return status + " · github sync failed", nil
+	}
+	count, err := m.store.SyncGitHubAnnotations(*pr, threads)
+	if err != nil {
+		return "", err
+	}
+	m.session.RefreshFilters()
+	return fmt.Sprintf("PR #%d synced · %d annotations", pr.Number, count), nil
 }
 
 type displayLine = review.DisplayLine
@@ -611,6 +712,169 @@ func sidebarPath(path string, width int, selected, viewed bool) string {
 	return dimStyle.Render(prefix) + base + pad
 }
 
+func (m *Model) openPRPicker(ctx context.Context) {
+	if m.cfg.Offline {
+		m.status = "offline mode"
+		return
+	}
+	prs, err := gh.NewClient(m.repo.Root).PRList(ctx)
+	m.prPicker = true
+	m.prPickerInput = ""
+	m.prPickerIndex = 0
+	m.prCandidates = prs
+	if err != nil {
+		m.status = "PR list failed; type number"
+		m.prCandidates = nil
+		return
+	}
+	if m.store != nil && m.store.GitHub != nil {
+		for i, pr := range prs {
+			if pr.Number == m.store.GitHub.Number {
+				m.prPickerIndex = i
+				break
+			}
+		}
+	}
+}
+
+func (m Model) updatePRPicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	previousStatus := m.status
+	switch msg.String() {
+	case "esc":
+		m.prPicker = false
+		m.prPickerInput = ""
+		return m, nil
+	case "up", "k":
+		m.prPickerIndex = max(0, m.prPickerIndex-1)
+		return m, nil
+	case "down", "j":
+		m.prPickerIndex = min(max(0, len(m.filteredPRs())-1), m.prPickerIndex+1)
+		return m, nil
+	case "backspace":
+		if len(m.prPickerInput) > 0 {
+			m.prPickerInput = m.prPickerInput[:len(m.prPickerInput)-1]
+			m.prPickerIndex = 0
+		}
+		return m, nil
+	case "enter":
+		pr, err := m.selectedPickerPR(context.Background())
+		m.prPicker = false
+		m.prPickerInput = ""
+		if err != nil {
+			m.status = err.Error()
+			return m, m.statusToastCmd(previousStatus)
+		}
+		if status, err := m.attachAndSyncPR(context.Background(), pr); err != nil {
+			m.status = err.Error()
+		} else {
+			m.status = status
+		}
+		return m, m.statusToastCmd(previousStatus)
+	}
+	for _, r := range msg.Runes {
+		if r >= 32 && r != 127 {
+			m.prPickerInput += string(r)
+			m.prPickerIndex = 0
+		}
+	}
+	return m, nil
+}
+
+func (m Model) selectedPickerPR(ctx context.Context) (gh.AttachedPR, error) {
+	input := strings.TrimSpace(m.prPickerInput)
+	client := gh.NewClient(m.repo.Root)
+	if n, ok := parsePRNumber(input); ok {
+		return client.PRView(ctx, n)
+	}
+	filtered := m.filteredPRs()
+	if len(filtered) == 0 {
+		return gh.AttachedPR{}, fmt.Errorf("no PR selected")
+	}
+	idx := clamp(m.prPickerIndex, 0, len(filtered)-1)
+	repo, err := client.Repo(ctx)
+	if err != nil {
+		return gh.AttachedPR{}, err
+	}
+	pr := filtered[idx]
+	return gh.AttachedPR{Owner: repo.Owner, Repo: repo.Name, Number: pr.Number, URL: pr.URL, Title: pr.Title, AuthorLogin: pr.AuthorLogin, HeadRef: pr.HeadRef, BaseRef: pr.BaseRef, HeadOID: pr.HeadOID}, nil
+}
+
+func parsePRNumber(input string) (int, bool) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return 0, false
+	}
+	if strings.Contains(input, "/pull/") {
+		parts := strings.Split(strings.TrimRight(input, "/"), "/")
+		input = parts[len(parts)-1]
+	} else if strings.Contains(input, "#") {
+		parts := strings.Split(input, "#")
+		input = parts[len(parts)-1]
+	}
+	n, err := strconv.Atoi(input)
+	return n, err == nil && n > 0
+}
+
+func (m Model) filteredPRs() []gh.PullRequest {
+	q := strings.ToLower(strings.TrimSpace(m.prPickerInput))
+	if q == "" {
+		return m.prCandidates
+	}
+	var out []gh.PullRequest
+	for _, pr := range m.prCandidates {
+		haystack := strings.ToLower(fmt.Sprintf("%d %s %s %s", pr.Number, pr.Title, pr.AuthorLogin, pr.HeadRef))
+		if strings.Contains(haystack, q) {
+			out = append(out, pr)
+		}
+	}
+	return out
+}
+
+func (m *Model) attachAndSyncPR(ctx context.Context, pr gh.AttachedPR) (string, error) {
+	if err := m.store.AttachGitHubPR(pr); err != nil {
+		return "", err
+	}
+	threads, err := gh.NewClient(m.repo.Root).Threads(ctx, pr)
+	if err != nil {
+		return fmt.Sprintf("attached PR #%d · sync failed", pr.Number), nil
+	}
+	count, err := m.store.SyncGitHubAnnotations(pr, threads)
+	if err != nil {
+		return "", err
+	}
+	m.session.RefreshFilters()
+	return fmt.Sprintf("attached PR #%d · %d annotations", pr.Number, count), nil
+}
+
+func (m Model) renderPRPicker() string {
+	filtered := m.filteredPRs()
+	w := max(20, m.width)
+	rows := []string{fmt.Sprintf("# attach PR: %s", m.prPickerInput)}
+	if len(filtered) == 0 {
+		rows = append(rows, dimStyle.Render("  no matching PRs"))
+	} else {
+		limit := min(5, len(filtered))
+		start := clamp(m.prPickerIndex-limit/2, 0, max(0, len(filtered)-limit))
+		for i := start; i < start+limit && i < len(filtered); i++ {
+			pr := filtered[i]
+			prefix := "  "
+			style := dimStyle
+			if i == m.prPickerIndex {
+				prefix = "▌ "
+				style = selectedStyle
+			}
+			draft := ""
+			if pr.IsDraft {
+				draft = " draft"
+			}
+			line := fmt.Sprintf("%s#%d %s  %s  %s%s", prefix, pr.Number, truncate(pr.Title, max(10, w-36)), pr.AuthorLogin, pr.HeadRef, draft)
+			rows = append(rows, style.Render(truncate(line, w)))
+		}
+	}
+	rows = append(rows, dimStyle.Render("enter attach · esc cancel"))
+	return strings.Join(rows, "\n")
+}
+
 func (m Model) updateJumpPrompt(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	previousStatus := m.status
 	switch msg.String() {
@@ -794,7 +1058,11 @@ func (m Model) renderAnnotationPreview(maxRows int) []string {
 		if p.Annotation.LineEnd != 0 && p.Annotation.LineEnd != p.Annotation.LineStart {
 			loc = fmt.Sprintf("● %s:%d-%d", compactPath(p.Annotation.Path, sidebarWidth-10), p.Annotation.LineStart, p.Annotation.LineEnd)
 		}
-		body := "  " + truncate(strings.ReplaceAll(p.Annotation.Body, "\n", " "), sidebarWidth-2)
+		bodyText := strings.ReplaceAll(p.Annotation.Body, "\n", " ")
+		if author := annotationAuthor(p.Annotation); author != "" {
+			bodyText = author + ": " + bodyText
+		}
+		body := "  " + truncate(bodyText, sidebarWidth-2)
 		isSelected := hasSelected && selected.ID == p.Annotation.ID
 		if isSelected {
 			rows = append(rows, padRightStyled(selectedAnnotationStyle.Render(truncate(loc, sidebarWidth)), sidebarWidth, selectedStyle))
@@ -829,18 +1097,21 @@ func (m Model) renderDiffHeader(width int) string {
 }
 
 func (m Model) renderStatus() string {
-	mode := string(m.cfg.Mode)
-	if mode == "" {
-		mode = string(git.ModeBranch)
-	}
+	compareTarget := m.compareTargetLabel()
 	files := m.session.Files()
 	stats := m.statsView(m.totalStats())
 	if annotations := m.totalAnnotationCount(); annotations > 0 {
 		stats = strings.TrimSpace(stats + " " + annotationStyle.Render(fmt.Sprintf("●%d", annotations)))
 	}
-	parts := []string{dimStyle.Render(mode), dimStyle.Render(fmt.Sprintf("%d/%d", min(m.session.FileIndex()+1, len(files)), len(files)))}
+	parts := []string{dimStyle.Render(compareTarget), dimStyle.Render(fmt.Sprintf("%d/%d", min(m.session.FileIndex()+1, len(files)), len(files)))}
 	if stats != "" {
 		parts = append(parts, stats)
+	}
+	if m.cfg.Offline {
+		parts = append(parts, dimStyle.Render("offline"))
+	}
+	if m.store != nil && m.store.GitHub != nil && m.store.GitHub.Number > 0 {
+		parts = append(parts, dimStyle.Render(fmt.Sprintf("PR #%d", m.store.GitHub.Number)))
 	}
 	if m.split {
 		parts = append(parts, dimStyle.Render("split"))
@@ -903,6 +1174,9 @@ func statusView(s string) string {
 }
 
 func (m Model) footerHints() string {
+	if m.prPicker {
+		return "# attach PR · enter attach · esc cancel"
+	}
 	if m.jumpPrompt {
 		return ":" + m.jumpInput + "  enter jump · esc cancel"
 	}
@@ -915,7 +1189,7 @@ func (m Model) footerHints() string {
 	if _, ok := m.selectedAnnotation(); ok {
 		return "e edit · d delete · ]a/[a annotations · y copy"
 	}
-	return "a annotate · r range · v viewed · b sidebar · ? help"
+	return "a annotate · r range · v viewed · # PR · ? help"
 }
 
 func (m Model) renderHelp() string {
@@ -927,6 +1201,7 @@ func (m Model) renderHelp() string {
 		"  ]a/[a      next/previous annotation",
 		"  :line      jump to file line",
 		"  n/p        next/previous file",
+		"  #          attach/change PR",
 		"",
 		"review",
 		"  v          toggle viewed",
@@ -1120,12 +1395,37 @@ func padRightStyled(s string, width int, style lipgloss.Style) string {
 	return s + style.Render(strings.Repeat(" ", width-w))
 }
 
+func annotationAuthor(n annotate.Annotation) string {
+	if n.GitHub == nil {
+		return ""
+	}
+	if n.GitHub.AuthorName != "" {
+		return n.GitHub.AuthorName
+	}
+	return n.GitHub.AuthorLogin
+}
+
 func annotationMarkdown(n annotate.Annotation) string {
 	loc := fmt.Sprintf("%s:%d", n.Path, n.LineStart)
 	if n.LineEnd != 0 && n.LineEnd != n.LineStart {
 		loc = fmt.Sprintf("%s:%d-%d", n.Path, n.LineStart, n.LineEnd)
 	}
-	out := fmt.Sprintf("- [ ] `%s` (%s) %s", loc, n.Side, n.Body)
+	body := n.Body
+	if author := annotationAuthor(n); author != "" {
+		body = author + ": " + body
+	}
+	out := fmt.Sprintf("- [ ] `%s` (%s) %s", loc, n.Side, body)
+	for _, r := range n.Replies {
+		author := r.AuthorLogin
+		if r.AuthorName != "" {
+			author = r.AuthorName
+		}
+		if author != "" {
+			out += fmt.Sprintf("\n  - %s: %s", author, r.Body)
+		} else {
+			out += fmt.Sprintf("\n  - %s", r.Body)
+		}
+	}
 	if n.Context != "" {
 		out += fmt.Sprintf("\n\n```diff\n%s\n```", n.Context)
 	}

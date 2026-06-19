@@ -225,7 +225,7 @@ func (p diffPane) formatLine(dl displayLine, selected, inRange bool, rangeGlyph 
 		text := railPrefix(rangeGlyph) + dl.Text
 		if selected {
 			if p.wrapCursorLine {
-				return wrapPadded(selectedHunkStyle.Render(text), p.width, selectedStyle)
+				return wrapStyledPadded(text, p.width, selectedHunkStyle, selectedStyle)
 			}
 			return padRightStyled(selectedHunkStyle.Render(truncate(text, p.width)), p.width, selectedStyle)
 		}
@@ -380,7 +380,7 @@ func (p diffPane) wrapSelectedLine(prefix, body string) string {
 		if i > 0 {
 			linePrefix = selectedStyle.Render(strings.Repeat(" ", prefixW))
 		}
-		rows = append(rows, padRightStyled(linePrefix+part, p.width, selectedStyle))
+		rows = append(rows, padRightStyled(linePrefix+withANSIBackground(part, selectedBg), p.width, selectedStyle))
 	}
 	return strings.Join(rows, "\n")
 }
@@ -390,6 +390,15 @@ func wrapPadded(s string, width int, style lipgloss.Style) string {
 	rows := make([]string, 0, len(parts))
 	for _, part := range parts {
 		rows = append(rows, padRightStyled(part, width, style))
+	}
+	return strings.Join(rows, "\n")
+}
+
+func wrapStyledPadded(s string, width int, textStyle, padStyle lipgloss.Style) string {
+	parts := strings.Split(xansi.Wrap(s, width, " /._"), "\n")
+	rows := make([]string, 0, len(parts))
+	for _, part := range parts {
+		rows = append(rows, padRightStyled(withANSIBackground(textStyle.Render(part), selectedBg), width, padStyle))
 	}
 	return strings.Join(rows, "\n")
 }

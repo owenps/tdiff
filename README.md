@@ -8,9 +8,6 @@ Export annotations as markdown for wherever you run your agents: Claude, Codex, 
 
 ![tdiff main review UI](docs/assets/screenshots/main-ui.png)
 
-> [!NOTE]
-> Github integration soon!
-
 ## Screenshots
 
 ### Multi-line Annotations
@@ -38,12 +35,15 @@ tdiff
 
 Default view shows branch changes plus staged/unstaged/untracked working tree changes.
 
+For GitHub integration be sure to have `gh` CLI installed.
+
 ## Flags
 
 ```sh
 tdiff --base main
 tdiff --staged
 tdiff --unstaged
+tdiff --offline
 tdiff export
 ```
 
@@ -73,8 +73,9 @@ This includes annotations and viewed-file state.
 - <kbd>y</kbd> copy selected annotation
 - <kbd>Y</kbd> copy all annotations markdown
 - <kbd>W</kbd> toggle whitespace handling/reload diff
-- <kbd>R</kbd> refresh diff
+- <kbd>R</kbd> refresh diff and sync GitHub PR annotations
 - <kbd>s</kbd> toggle split/unified placeholder
+- <kbd>#</kbd> attach/change GitHub PR (disabled with `--offline`)
 - <kbd>b</kbd> show/hide left sidebar
 - <kbd>x</kbd> toggle syntax highlighting
 - <kbd>c</kbd> toggle context dimming

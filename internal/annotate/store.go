@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	gh "github.com/owenps/tdiff/internal/github"
 )
 
 type Side string
@@ -16,21 +18,59 @@ const (
 	SideNew Side = "new"
 )
 
+type Source string
+
+const (
+	SourceLocal  Source = "local"
+	SourceGitHub Source = "github"
+)
+
 type Annotation struct {
-	ID         string    `json:"id"`
-	Path       string    `json:"path"`
-	Side       Side      `json:"side"`
-	Line       int       `json:"line"`
-	LineStart  int       `json:"line_start,omitempty"`
-	LineEnd    int       `json:"line_end,omitempty"`
-	HunkHeader string    `json:"hunk_header"`
-	Context    string    `json:"context"`
-	Body       string    `json:"body"`
-	Status     string    `json:"status"`
-	DiffHash   string    `json:"diff_hash"`
-	Outdated   bool      `json:"outdated"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID         string          `json:"id"`
+	Path       string          `json:"path"`
+	Side       Side            `json:"side"`
+	Line       int             `json:"line"`
+	LineStart  int             `json:"line_start,omitempty"`
+	LineEnd    int             `json:"line_end,omitempty"`
+	HunkHeader string          `json:"hunk_header"`
+	Context    string          `json:"context"`
+	Body       string          `json:"body"`
+	Replies    []Reply         `json:"replies,omitempty"`
+	Status     string          `json:"status"`
+	Source     Source          `json:"source,omitempty"`
+	DiffHash   string          `json:"diff_hash"`
+	Outdated   bool            `json:"outdated"`
+	GitHub     *GitHubMetadata `json:"github,omitempty"`
+	CreatedAt  time.Time       `json:"created_at"`
+	UpdatedAt  time.Time       `json:"updated_at"`
+}
+
+type Reply struct {
+	ID              string    `json:"id,omitempty"`
+	Body            string    `json:"body"`
+	AuthorLogin     string    `json:"author_login,omitempty"`
+	AuthorName      string    `json:"author_name,omitempty"`
+	AuthorAvatarURL string    `json:"author_avatar_url,omitempty"`
+	URL             string    `json:"url,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+type GitHubMetadata struct {
+	Owner           string `json:"owner"`
+	Repo            string `json:"repo"`
+	PRNumber        int    `json:"pr_number"`
+	ThreadID        string `json:"thread_id"`
+	CommentID       string `json:"comment_id,omitempty"`
+	URL             string `json:"url,omitempty"`
+	Side            string `json:"side,omitempty"`
+	StartSide       string `json:"start_side,omitempty"`
+	CommitID        string `json:"commit_id,omitempty"`
+	AuthorLogin     string `json:"author_login,omitempty"`
+	AuthorName      string `json:"author_name,omitempty"`
+	AuthorAvatarURL string `json:"author_avatar_url,omitempty"`
+	Resolved        bool   `json:"resolved,omitempty"`
+	Outdated        bool   `json:"outdated,omitempty"`
 }
 
 type ViewedFile struct {
@@ -40,8 +80,9 @@ type ViewedFile struct {
 }
 
 type Store struct {
-	Annotations []Annotation `json:"annotations"`
-	Viewed      []ViewedFile `json:"viewed"`
+	GitHub      *gh.AttachedPR `json:"github,omitempty"`
+	Annotations []Annotation   `json:"annotations"`
+	Viewed      []ViewedFile   `json:"viewed"`
 	path        string
 }
 
@@ -68,12 +109,14 @@ func Open(gitRoot string) (*Store, error) {
 
 func decodeStore(b []byte, store *Store) error {
 	var payload struct {
-		Annotations []Annotation `json:"annotations"`
-		Viewed      []ViewedFile `json:"viewed"`
+		GitHub      *gh.AttachedPR `json:"github"`
+		Annotations []Annotation   `json:"annotations"`
+		Viewed      []ViewedFile   `json:"viewed"`
 	}
 	if err := json.Unmarshal(b, &payload); err != nil {
 		return err
 	}
+	store.GitHub = payload.GitHub
 	store.Annotations = payload.Annotations
 	store.Viewed = payload.Viewed
 	return nil
@@ -124,6 +167,9 @@ func (s *Store) Add(n Annotation) error {
 	if n.Status == "" {
 		n.Status = "open"
 	}
+	if n.Source == "" {
+		n.Source = SourceLocal
+	}
 	if n.LineStart == 0 {
 		n.LineStart = n.Line
 	}
@@ -163,7 +209,7 @@ func (s *Store) Delete(id string) error {
 func (s *Store) AnnotationsFor(path string) []Annotation {
 	var out []Annotation
 	for _, n := range s.Annotations {
-		if n.Path == path && !n.Outdated {
+		if n.Path == path && !n.Outdated && n.Status != "resolved" {
 			out = append(out, normalize(n))
 		}
 	}
@@ -171,6 +217,9 @@ func (s *Store) AnnotationsFor(path string) []Annotation {
 }
 
 func normalize(n Annotation) Annotation {
+	if n.Source == "" {
+		n.Source = SourceLocal
+	}
 	if n.LineStart == 0 {
 		n.LineStart = n.Line
 	}
@@ -181,6 +230,91 @@ func normalize(n Annotation) Annotation {
 		n.Line = n.LineStart
 	}
 	return n
+}
+
+func (s *Store) AttachGitHubPR(pr gh.AttachedPR) error {
+	s.GitHub = &pr
+	return s.Save()
+}
+
+func (s *Store) SyncGitHubAnnotations(pr gh.AttachedPR, threads []gh.Thread) (int, error) {
+	seen := map[string]bool{}
+	count := 0
+	for _, thread := range threads {
+		if thread.Outdated || len(thread.Comments) == 0 {
+			continue
+		}
+		n := annotationFromGitHubThread(pr, thread)
+		if n.ID == "" {
+			continue
+		}
+		seen[n.GitHub.ThreadID] = true
+		count++
+		updated := false
+		for i := range s.Annotations {
+			if s.Annotations[i].Source == SourceGitHub && s.Annotations[i].GitHub != nil && s.Annotations[i].GitHub.ThreadID == n.GitHub.ThreadID {
+				s.Annotations[i] = n
+				updated = true
+				break
+			}
+		}
+		if !updated {
+			s.Annotations = append(s.Annotations, n)
+		}
+	}
+	filtered := s.Annotations[:0]
+	for _, n := range s.Annotations {
+		if n.Source == SourceGitHub && n.GitHub != nil && n.GitHub.Owner == pr.Owner && n.GitHub.Repo == pr.Repo && n.GitHub.PRNumber == pr.Number && !seen[n.GitHub.ThreadID] {
+			continue
+		}
+		filtered = append(filtered, n)
+	}
+	s.Annotations = filtered
+	return count, s.Save()
+}
+
+func annotationFromGitHubThread(pr gh.AttachedPR, thread gh.Thread) Annotation {
+	first := thread.Comments[0]
+	side := sideFromGitHub(thread.Side)
+	lineStart := thread.StartLine
+	if lineStart == 0 {
+		lineStart = thread.Line
+	}
+	lineEnd := thread.Line
+	if lineEnd == 0 {
+		lineEnd = lineStart
+	}
+	status := "open"
+	if thread.Resolved {
+		status = "resolved"
+	}
+	replies := make([]Reply, 0, len(thread.Comments)-1)
+	for _, c := range thread.Comments[1:] {
+		replies = append(replies, Reply{ID: c.ID, Body: c.Body, AuthorLogin: c.Author.Login, AuthorName: c.Author.Name, AuthorAvatarURL: c.Author.AvatarURL, URL: c.URL, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt})
+	}
+	return Annotation{
+		ID:        "github:" + thread.ID,
+		Path:      thread.Path,
+		Side:      side,
+		Line:      lineStart,
+		LineStart: lineStart,
+		LineEnd:   lineEnd,
+		Body:      first.Body,
+		Replies:   replies,
+		Status:    status,
+		Source:    SourceGitHub,
+		Outdated:  thread.Outdated,
+		GitHub:    &GitHubMetadata{Owner: pr.Owner, Repo: pr.Repo, PRNumber: pr.Number, ThreadID: thread.ID, CommentID: first.ID, URL: first.URL, Side: thread.Side, StartSide: thread.StartSide, AuthorLogin: first.Author.Login, AuthorName: first.Author.Name, AuthorAvatarURL: first.Author.AvatarURL, Resolved: thread.Resolved, Outdated: thread.Outdated},
+		CreatedAt: first.CreatedAt,
+		UpdatedAt: first.UpdatedAt,
+	}
+}
+
+func sideFromGitHub(side string) Side {
+	if side == "LEFT" {
+		return SideOld
+	}
+	return SideNew
 }
 
 func (s *Store) MarkViewed(path, diffHash string) error {

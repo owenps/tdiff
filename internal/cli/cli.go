@@ -32,6 +32,7 @@ func Run() error {
 	staged := fs.Bool("staged", false, "show staged diff")
 	unstaged := fs.Bool("unstaged", false, "show unstaged diff")
 	ignoreWhitespace := fs.Bool("ignore-space-change", false, "ignore whitespace changes")
+	offline := fs.Bool("offline", false, "disable network/external integrations")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return err
 	}
@@ -44,7 +45,7 @@ func Run() error {
 		mode = git.ModeUnstaged
 	}
 
-	m, err := app.New(ctx, app.Config{Base: *base, Mode: mode, IgnoreWhitespace: *ignoreWhitespace})
+	m, err := app.New(ctx, app.Config{Base: *base, Mode: mode, IgnoreWhitespace: *ignoreWhitespace, Offline: *offline})
 	if err != nil {
 		return err
 	}

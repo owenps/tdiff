@@ -72,12 +72,44 @@ func TestDiffPaneWrapsOnlySelectedLineWhenEnabled(t *testing.T) {
 	}
 	m.session.MoveLine(1, 10)
 
-	out := xansi.Strip(m.diffPane(28).Render(4))
+	raw := m.diffPane(28).Render(4)
+	out := xansi.Strip(raw)
 	if strings.Contains(out, "…") || !strings.Contains(out, "seven eight") {
 		t.Fatalf("selected line not wrapped fully:\n%s", out)
 	}
 	if got := len(strings.Split(out, "\n")); got < 3 {
 		t.Fatalf("wrapped lines=%d, want >=3:\n%s", got, out)
+	}
+	if !strings.Contains(raw, "\x1b[48;5;"+string(selectedBg)+"mseven") {
+		t.Fatalf("wrapped continuation text missing selected highlight:\n%q", raw)
+	}
+}
+
+func TestDiffPaneWrapsSelectedHunkHighlight(t *testing.T) {
+	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@ one two three four five six seven eight"}}}
+	store := &annotate.Store{}
+	m := Model{
+		store:          store,
+		annotations:    annotations.NewWorkflow(store),
+		session:        review.NewSession([]diff.File{file}),
+		wrapCursorLine: true,
+		width:          80,
+		syntax:         false,
+		syntaxCache:    make(map[string]string),
+	}
+
+	raw := m.diffPane(24).Render(4)
+	out := xansi.Strip(raw)
+	if strings.Contains(out, "…") || !strings.Contains(out, "seven eight") {
+		t.Fatalf("selected hunk not wrapped fully:\n%s", out)
+	}
+	for _, line := range strings.Split(raw, "\n") {
+		plain := xansi.Strip(line)
+		if strings.Contains(plain, "one") || strings.Contains(plain, "three") || strings.Contains(plain, "five") || strings.Contains(plain, "seven") {
+			if !strings.Contains(line, "48;5;"+string(selectedBg)) {
+				t.Fatalf("wrapped hunk line missing selected highlight:\n%q", line)
+			}
+		}
 	}
 }
 

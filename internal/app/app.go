@@ -62,6 +62,8 @@ type Model struct {
 	composerBaseView    string
 	syntaxCache         map[string]string
 	splitHunkCache      map[string]map[string]bool
+	splitNavCache       map[string]splitNav
+	splitOffset         int
 }
 
 func New(ctx context.Context, cfg Config) (Model, error) {
@@ -73,7 +75,7 @@ func New(ctx context.Context, cfg Config) (Model, error) {
 	if err != nil {
 		return Model{}, err
 	}
-	m := Model{repo: repo, cfg: cfg, store: store, annotations: annotations.NewWorkflow(store), session: review.NewSession(nil), syntax: true, contextDim: true, syntaxCache: make(map[string]string), splitHunkCache: make(map[string]map[string]bool)}
+	m := Model{repo: repo, cfg: cfg, store: store, annotations: annotations.NewWorkflow(store), session: review.NewSession(nil), syntax: true, contextDim: true, syntaxCache: make(map[string]string), splitHunkCache: make(map[string]map[string]bool), splitNavCache: make(map[string]splitNav)}
 	m.session.SetStores(store, store)
 	m.editor = textarea.New()
 	m.editor.Placeholder = "annotation"
@@ -206,6 +208,8 @@ func (m *Model) reload(ctx context.Context) error {
 	m.session.SetSnapshot(s.Files, s.Hash)
 	m.syntaxCache = make(map[string]string)
 	m.splitHunkCache = make(map[string]map[string]bool)
+	m.splitNavCache = make(map[string]splitNav)
+	m.splitOffset = 0
 	return nil
 }
 
@@ -592,22 +596,26 @@ func (m *Model) statusToastCmd(previous string) tea.Cmd {
 
 func (m *Model) jumpTop() {
 	m.session.JumpTop()
+	m.splitOffset = 0
 }
 
 func (m *Model) jumpBottom() {
 	m.session.JumpBottom(m.bodyHeight())
+	m.ensureSplitCursorVisible(m.bodyHeight())
 }
 
 func (m *Model) nextHunk() {
 	if !m.session.NextHunk(m.bodyHeight()) {
 		m.status = "no next hunk"
 	}
+	m.ensureSplitCursorVisible(m.bodyHeight())
 }
 
 func (m *Model) prevHunk() {
 	if !m.session.PrevHunk(m.bodyHeight()) {
 		m.status = "no previous hunk"
 	}
+	m.ensureSplitCursorVisible(m.bodyHeight())
 }
 
 func (m *Model) nextAnnotation() {
@@ -628,11 +636,14 @@ func (m *Model) jumpAnnotation(delta int) {
 }
 
 func (m *Model) jumpToFileLine(line int) bool {
-	return m.session.JumpToFileLine(line, m.bodyHeight())
+	ok := m.session.JumpToFileLine(line, m.bodyHeight())
+	m.ensureSplitCursorVisible(m.bodyHeight())
+	return ok
 }
 
 func (m *Model) ensureCursorVisible() {
 	m.session.EnsureVisible(m.bodyHeight())
+	m.ensureSplitCursorVisible(m.bodyHeight())
 }
 
 func (m Model) bodyHeight() int {
@@ -957,6 +968,7 @@ const (
 	lineNoWidth                 = 4
 	intralineContextLines       = 200
 	syntaxMaxFileLines          = 2500
+	splitSyntaxMaxFileLines     = 600
 	syntaxMaxLineWidth          = 500
 	syntaxCacheMaxEntries       = 4000
 	statusToastDuration         = 3 * time.Second

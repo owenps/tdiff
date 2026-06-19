@@ -80,6 +80,8 @@ func (m *Model) handleRefreshLoaded(msg refreshLoadedMsg) {
 	m.session.SetSnapshot(msg.snap.Files, msg.snap.Hash)
 	m.syntaxCache = make(map[string]string)
 	m.splitHunkCache = make(map[string]map[string]bool)
+	m.splitNavCache = make(map[string]splitNav)
+	m.splitOffset = 0
 	if msg.offline {
 		m.status = "diff refreshed · offline"
 		return
@@ -189,19 +191,22 @@ func (m Model) updateKey(msg tea.KeyMsg, previousStatus string) (tea.Model, tea.
 		}
 	case "j", "down":
 		m.pendingKey = ""
-		m.session.MoveLine(1, m.bodyHeight())
+		m.moveLine(1)
 	case "k", "up":
 		m.pendingKey = ""
-		m.session.MoveLine(-1, m.bodyHeight())
+		m.moveLine(-1)
 	case "n", "right":
 		m.pendingKey = ""
 		m.session.MoveFile(1)
+		m.splitOffset = 0
 	case "p", "left":
 		m.pendingKey = ""
 		m.session.MoveFile(-1)
+		m.splitOffset = 0
 	case "s":
 		m.pendingKey = ""
 		m.split = !m.split
+		m.ensureSplitCursorVisible(m.bodyHeight())
 	case "x":
 		m.pendingKey = ""
 		m.syntax = !m.syntax

@@ -122,6 +122,87 @@ func TestDiffPaneSplitContextUsesFullWidthForAddOnlyHunk(t *testing.T) {
 	}
 }
 
+func TestDiffPaneSplitSeparatedAddDeleteHunkUsesFullWidth(t *testing.T) {
+	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1,4 +1,4 @@", Lines: []diff.Line{
+		{Kind: diff.Context, OldNo: 1, NewNo: 1, Text: " context before"},
+		{Kind: diff.Add, NewNo: 2, Text: "+standalone add fills gap"},
+		{Kind: diff.Context, OldNo: 2, NewNo: 3, Text: " context between fills gap"},
+		{Kind: diff.Delete, OldNo: 3, Text: "-standalone delete fills gap"},
+		{Kind: diff.Context, OldNo: 4, NewNo: 4, Text: " context after"},
+	}}}}
+	store := &annotate.Store{}
+	m := Model{
+		store:       store,
+		annotations: annotations.NewWorkflow(store),
+		session:     review.NewSession([]diff.File{file}),
+		width:       80,
+		split:       true,
+		syntax:      false,
+		syntaxCache: make(map[string]string),
+	}
+
+	out := xansi.Strip(m.diffPane(52).Render(8))
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "fills gap") && strings.Contains(line, "│") {
+			t.Fatalf("separated pure changes still have split gap:\n%s", out)
+		}
+	}
+}
+
+func TestDiffPaneSplitReplacementHunkStaysSplit(t *testing.T) {
+	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@", Lines: []diff.Line{
+		{Kind: diff.Delete, OldNo: 1, Text: "-old"},
+		{Kind: diff.Add, NewNo: 1, Text: "+new"},
+	}}}}
+	store := &annotate.Store{}
+	m := Model{
+		store:       store,
+		annotations: annotations.NewWorkflow(store),
+		session:     review.NewSession([]diff.File{file}),
+		width:       80,
+		split:       true,
+		syntax:      false,
+		syntaxCache: make(map[string]string),
+	}
+
+	out := xansi.Strip(m.diffPane(44).Render(3))
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "old") && !strings.Contains(line, "│") {
+			t.Fatalf("replacement hunk did not stay split:\n%s", out)
+		}
+	}
+}
+
+func TestSplitNavigationMovesByVisualRows(t *testing.T) {
+	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1,3 +1,3 @@", Lines: []diff.Line{
+		{Kind: diff.Context, OldNo: 1, NewNo: 1, Text: " before"},
+		{Kind: diff.Delete, OldNo: 2, Text: "-old"},
+		{Kind: diff.Add, NewNo: 2, Text: "+new"},
+		{Kind: diff.Context, OldNo: 3, NewNo: 3, Text: " after"},
+	}}}}
+	store := &annotate.Store{}
+	m := Model{
+		store:       store,
+		annotations: annotations.NewWorkflow(store),
+		session:     review.NewSession([]diff.File{file}),
+		width:       80,
+		height:      12,
+		split:       true,
+		syntax:      false,
+		syntaxCache: make(map[string]string),
+	}
+	m.session.JumpToIndex(0, 2, m.bodyHeight())
+
+	m.moveLine(1)
+	if got := m.session.LineIndex(); got != 4 {
+		t.Fatalf("split j moved to line %d, want next visual row 4", got)
+	}
+	m.moveLine(-1)
+	if got := m.session.LineIndex(); got != 3 {
+		t.Fatalf("split k moved to line %d, want previous visual row 3", got)
+	}
+}
+
 func TestDiffPaneHidesUnifiedLineNumbers(t *testing.T) {
 	m := diffPaneTestModel(false)
 	m.hideLineNumbers = true

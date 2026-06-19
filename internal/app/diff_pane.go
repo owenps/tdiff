@@ -26,6 +26,8 @@ type diffPane struct {
 	hideLineNumbers bool
 	syntaxCache     map[string]string
 	fullWidthHunks  map[string]bool
+	splitLayoutRows []splitRow
+	splitOffset     int
 	session         review.Session
 	workflow        annotations.Workflow
 	fileAnnotations []annotate.Annotation
@@ -45,6 +47,12 @@ func (m Model) diffPane(width int) diffPane {
 	if m.store != nil {
 		fileAnnotations = m.store.AnnotationsFor(path)
 	}
+	var fullWidthHunks map[string]bool
+	var splitRows []splitRow
+	if m.split {
+		fullWidthHunks = m.splitFullWidthHunks()
+		splitRows = m.splitNavForCurrentFile().rows
+	}
 	return diffPane{
 		path:            path,
 		width:           width,
@@ -54,7 +62,9 @@ func (m Model) diffPane(width int) diffPane {
 		wrapCursorLine:  m.wrapCursorLine,
 		hideLineNumbers: m.hideLineNumbers,
 		syntaxCache:     m.syntaxCache,
-		fullWidthHunks:  m.splitFullWidthHunks(),
+		fullWidthHunks:  fullWidthHunks,
+		splitLayoutRows: splitRows,
+		splitOffset:     m.splitOffset,
 		session:         m.session,
 		workflow:        m.annotations,
 		fileAnnotations: fileAnnotations,
@@ -90,18 +100,116 @@ func (m Model) splitFullWidthHunks() map[string]bool {
 func fullWidthHunksForFile(file diff.File) map[string]bool {
 	out := make(map[string]bool, len(file.Hunks))
 	for _, hunk := range file.Hunks {
-		add, del := false, false
-		for _, line := range hunk.Lines {
-			switch line.Kind {
-			case diff.Add:
-				add = true
-			case diff.Delete:
-				del = true
+		hasChange := false
+		hasReplacement := false
+		for i := 0; i < len(hunk.Lines); i++ {
+			line := hunk.Lines[i]
+			if line.Kind == diff.Add || line.Kind == diff.Delete {
+				hasChange = true
+			}
+			if line.Kind != diff.Delete {
+				continue
+			}
+			j := i
+			for j < len(hunk.Lines) && hunk.Lines[j].Kind == diff.Delete {
+				j++
+			}
+			if j < len(hunk.Lines) && hunk.Lines[j].Kind == diff.Add {
+				hasReplacement = true
+				break
 			}
 		}
-		out[hunk.Header] = add != del
+		out[hunk.Header] = hasChange && !hasReplacement
 	}
 	return out
+}
+
+type splitNav struct {
+	rows      []splitRow
+	lineToRow map[int]int
+}
+
+func (m *Model) moveLine(delta int) {
+	if !m.split {
+		m.session.MoveLine(delta, m.bodyHeight())
+		return
+	}
+	nav := m.splitNavForCurrentFile()
+	if len(nav.rows) == 0 {
+		return
+	}
+	current := m.session.LineIndex()
+	rowIdx, ok := nav.lineToRow[current]
+	if !ok {
+		m.session.MoveLine(delta, m.bodyHeight())
+		return
+	}
+	targetRow := clamp(rowIdx+delta, 0, len(nav.rows)-1)
+	targetLine := splitNavRowTargetLine(nav.rows[targetRow], delta)
+	if targetLine < 0 || targetLine == current {
+		return
+	}
+	m.session.JumpToIndex(m.session.FileIndex(), targetLine, m.bodyHeight())
+	m.ensureSplitCursorVisible(m.bodyHeight())
+}
+
+func (m Model) splitNavForCurrentFile() splitNav {
+	path := m.currentPath()
+	if path == "" {
+		return splitNav{}
+	}
+	if m.splitNavCache != nil {
+		if cached, ok := m.splitNavCache[path]; ok {
+			return cached
+		}
+	}
+	pane := diffPane{fullWidthHunks: m.splitFullWidthHunks(), session: m.session}
+	rows := pane.splitRows(m.currentLines(), 0)
+	nav := splitNav{rows: rows, lineToRow: make(map[int]int, len(rows)*2)}
+	for rowIdx, row := range rows {
+		if row.oldIdx >= 0 {
+			nav.lineToRow[row.oldIdx] = rowIdx
+		}
+		if row.newIdx >= 0 {
+			nav.lineToRow[row.newIdx] = rowIdx
+		}
+	}
+	if m.splitNavCache != nil {
+		m.splitNavCache[path] = nav
+	}
+	return nav
+}
+
+func (m *Model) ensureSplitCursorVisible(height int) {
+	if !m.split {
+		return
+	}
+	nav := m.splitNavForCurrentFile()
+	rowIdx, ok := nav.lineToRow[m.session.LineIndex()]
+	if !ok {
+		m.splitOffset = 0
+		return
+	}
+	if rowIdx < m.splitOffset {
+		m.splitOffset = rowIdx
+	}
+	if rowIdx >= m.splitOffset+height {
+		m.splitOffset = rowIdx - height + 1
+	}
+	m.splitOffset = clamp(m.splitOffset, 0, max(0, len(nav.rows)-height))
+}
+
+func splitNavRowTargetLine(row splitRow, delta int) int {
+	if row.oldIdx >= 0 && row.newIdx >= 0 {
+		if delta < 0 {
+			return row.newIdx
+		}
+		return row.oldIdx
+	}
+	if row.oldIdx >= 0 {
+		return row.oldIdx
+	}
+	return row.newIdx
 }
 
 func (p diffPane) Render(height int) string {
@@ -149,20 +257,21 @@ type splitRow struct {
 
 func (p diffPane) renderSplit(height int) string {
 	style := lipgloss.NewStyle().Width(p.width)
-	window := p.session.LineWindow(height)
-	lineCount := window.LineCount
-	start := window.Start
-	lines := window.Lines
+	lineCount := p.session.CurrentLineCount()
 	syntaxOK := p.syntaxAllowed(lineCount)
-	rows := p.splitRows(lines, start)
-	if len(rows) > height {
-		rows = rows[:height]
+	rows := p.splitLayoutRows
+	if rows == nil {
+		rows = p.splitRows(p.session.CurrentLines(), 0)
 	}
+	start := clamp(p.splitOffset, 0, max(0, len(rows)-height))
+	end := min(len(rows), start+height)
+	rows = rows[start:end]
 
 	var out []string
+	lineIdx := p.session.LineIndex()
 	for _, row := range rows {
 		line := p.formatSplitRow(row, syntaxOK)
-		selected := row.oldIdx == window.LineIndex || row.newIdx == window.LineIndex
+		selected := row.oldIdx == lineIdx || row.newIdx == lineIdx
 		inRange := (row.oldIdx >= 0 && p.inActiveRange(row.oldIdx)) || (row.newIdx >= 0 && p.inActiveRange(row.newIdx))
 		if !selected {
 			if inRange {
@@ -261,7 +370,11 @@ func (p diffPane) splitRows(lines []displayLine, start int) []splitRow {
 }
 
 func (p diffPane) syntaxAllowed(lineCount int) bool {
-	return p.syntax && lineCount <= syntaxMaxFileLines && lexers.Match(p.path) != nil
+	limit := syntaxMaxFileLines
+	if p.split {
+		limit = splitSyntaxMaxFileLines
+	}
+	return p.syntax && lineCount <= limit && lexers.Match(p.path) != nil
 }
 
 func (p diffPane) formatLine(dl displayLine, selected, inRange bool, rangeGlyph string, syntaxOK bool, intralineAgainst string) string {
@@ -354,7 +467,10 @@ func (p diffPane) formatFullWidthSplitRow(row splitRow, prefix, marker, rangeGly
 		lineNo, kind := splitLineNoAndKind(line, side)
 		rest += p.lineNoView(lineNo, kind, selected, inRange) + gutterView(" ", selected, inRange)
 	}
-	fixed := 2 + xansi.StringWidth(rest)
+	fixed := 2
+	if !p.hideLineNumbers {
+		fixed += lineNoWidth + 1
+	}
 	cellW := max(1, p.width-fixed)
 	rest += p.splitCellText(line, side, cellW, selected, inRange, syntaxOK, "")
 	if selected {
@@ -656,10 +772,6 @@ func (p diffPane) syntaxView(s string) string {
 	if strings.TrimSpace(s) == "" || xansi.StringWidth(s) > syntaxMaxLineWidth {
 		return s
 	}
-	lexer := lexers.Match(p.path)
-	if lexer == nil {
-		return s
-	}
 	body := strings.TrimRight(s, " \t")
 	trail := s[len(body):]
 	key := p.path + "\x00" + body
@@ -670,6 +782,10 @@ func (p diffPane) syntaxView(s string) string {
 		if len(p.syntaxCache) >= syntaxCacheMaxEntries {
 			clear(p.syntaxCache)
 		}
+	}
+	lexer := lexers.Match(p.path)
+	if lexer == nil {
+		return s
 	}
 	formatter := formatters.Get("terminal256")
 	style := styles.Get("github-dark")

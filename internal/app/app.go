@@ -87,7 +87,7 @@ func New(ctx context.Context, cfg Config) (Model, error) {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(textarea.Blink, loadingSpinnerTick())
+	return tea.Batch(textarea.Blink, loadingSpinnerTick(), tea.SetWindowTitle("∓"))
 }
 
 type clearStatusMsg struct{ id int }

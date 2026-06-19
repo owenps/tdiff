@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/owenps/tdiff/internal/annotate"
+	"github.com/owenps/tdiff/internal/annotationtarget"
 	"github.com/owenps/tdiff/internal/diff"
 )
 
@@ -281,27 +282,14 @@ func (s Session) SelectedAnnotation() (annotate.Annotation, bool) {
 }
 
 func AnnotationAtLine(annotations []annotate.Annotation, line diff.Line) (annotate.Annotation, bool) {
-	side, lineNo, ok := lineTarget(line)
+	side, _, ok := annotationtarget.ForLine(line)
 	if !ok {
 		return annotate.Annotation{}, false
 	}
 	for _, n := range annotations {
-		if n.Side == side && n.LineStart <= lineNo && lineNo <= n.LineEnd {
+		if n.Side == side && annotationtarget.MatchesLine(n, line) {
 			return n, true
 		}
 	}
 	return annotate.Annotation{}, false
-}
-
-func lineTarget(l diff.Line) (annotate.Side, int, bool) {
-	if l.Kind == diff.Delete {
-		return annotate.SideOld, l.OldNo, l.OldNo > 0
-	}
-	if l.NewNo > 0 {
-		return annotate.SideNew, l.NewNo, true
-	}
-	if l.OldNo > 0 {
-		return annotate.SideOld, l.OldNo, true
-	}
-	return annotate.SideNew, 0, false
 }

@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/owenps/tdiff/internal/annotate"
+	"github.com/owenps/tdiff/internal/annotationtarget"
 	"github.com/owenps/tdiff/internal/diff"
 	"github.com/owenps/tdiff/internal/review"
 )
@@ -38,7 +39,7 @@ func NewWorkflow(store Store) Workflow {
 }
 
 func (w Workflow) TargetForLine(dl DiffLine) (Target, error) {
-	side, line, ok := lineTarget(dl.Line)
+	side, line, ok := annotationtarget.ForLine(dl.Line)
 	if !ok {
 		return Target{}, fmt.Errorf("no line selected")
 	}
@@ -67,7 +68,7 @@ func (w Workflow) TargetForRange(lines []DiffLine) (Target, error) {
 	var target Target
 	var context []string
 	for _, dl := range lines {
-		side, line, ok := lineTarget(dl.Line)
+		side, line, ok := annotationtarget.ForLine(dl.Line)
 		if !ok {
 			continue
 		}
@@ -92,12 +93,12 @@ func (w Workflow) TargetForRange(lines []DiffLine) (Target, error) {
 }
 
 func (w Workflow) AnnotationAt(path string, line diff.Line) (annotate.Annotation, bool) {
-	side, lineNo, ok := lineTarget(line)
+	side, _, ok := annotationtarget.ForLine(line)
 	if !ok {
 		return annotate.Annotation{}, false
 	}
 	for _, n := range w.store.AnnotationsFor(path) {
-		if n.Side == side && n.LineStart <= lineNo && lineNo <= n.LineEnd {
+		if n.Side == side && annotationtarget.MatchesLine(n, line) {
 			return n, true
 		}
 	}
@@ -111,13 +112,14 @@ func (w Workflow) MarkerFor(annotation annotate.Annotation, line diff.Line) stri
 	} else {
 		lineNo = line.OldNo
 	}
-	if lineNo == 0 || lineNo < annotation.LineStart || lineNo > annotation.LineEnd {
+	start, end := annotationtarget.Range(annotation)
+	if lineNo == 0 || lineNo < start || lineNo > end {
 		return ""
 	}
-	if annotation.LineStart == annotation.LineEnd || lineNo == annotation.LineStart {
+	if start == end || lineNo == start {
 		return "●"
 	}
-	if lineNo == annotation.LineEnd {
+	if lineNo == end {
 		return "╰"
 	}
 	return "│"
@@ -164,37 +166,12 @@ func (w Workflow) overlapsExisting(path string, target Target) bool {
 		if n.Side != target.Side {
 			continue
 		}
-		annotationStart, annotationEnd := annotationRange(n)
+		annotationStart, annotationEnd := annotationtarget.Range(n)
 		if start <= annotationEnd && annotationStart <= end {
 			return true
 		}
 	}
 	return false
-}
-
-func annotationRange(n annotate.Annotation) (int, int) {
-	start := n.LineStart
-	if start == 0 {
-		start = n.Line
-	}
-	end := n.LineEnd
-	if end == 0 {
-		end = start
-	}
-	return start, end
-}
-
-func lineTarget(l diff.Line) (annotate.Side, int, bool) {
-	if l.Kind == diff.Delete {
-		return annotate.SideOld, l.OldNo, l.OldNo > 0
-	}
-	if l.NewNo > 0 {
-		return annotate.SideNew, l.NewNo, true
-	}
-	if l.OldNo > 0 {
-		return annotate.SideOld, l.OldNo, true
-	}
-	return annotate.SideNew, 0, false
 }
 
 func min(a, b int) int {

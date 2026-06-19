@@ -25,6 +25,7 @@ type diffPane struct {
 	wrapCursorLine  bool
 	hideLineNumbers bool
 	syntaxCache     map[string]string
+	fullWidthHunks  map[string]bool
 	session         review.Session
 	workflow        annotations.Workflow
 	fileAnnotations []annotate.Annotation
@@ -53,6 +54,7 @@ func (m Model) diffPane(width int) diffPane {
 		wrapCursorLine:  m.wrapCursorLine,
 		hideLineNumbers: m.hideLineNumbers,
 		syntaxCache:     m.syntaxCache,
+		fullWidthHunks:  m.splitFullWidthHunks(),
 		session:         m.session,
 		workflow:        m.annotations,
 		fileAnnotations: fileAnnotations,
@@ -61,6 +63,45 @@ func (m Model) diffPane(width int) diffPane {
 
 func (m Model) syntaxAllowed(lineCount int) bool {
 	return m.diffPane(0).syntaxAllowed(lineCount)
+}
+
+func (m Model) splitFullWidthHunks() map[string]bool {
+	path := m.currentPath()
+	if path == "" {
+		return nil
+	}
+	if m.splitHunkCache != nil {
+		if cached, ok := m.splitHunkCache[path]; ok {
+			return cached
+		}
+	}
+	files := m.session.Files()
+	idx := m.session.FileIndex()
+	if idx < 0 || idx >= len(files) {
+		return nil
+	}
+	out := fullWidthHunksForFile(files[idx])
+	if m.splitHunkCache != nil {
+		m.splitHunkCache[path] = out
+	}
+	return out
+}
+
+func fullWidthHunksForFile(file diff.File) map[string]bool {
+	out := make(map[string]bool, len(file.Hunks))
+	for _, hunk := range file.Hunks {
+		add, del := false, false
+		for _, line := range hunk.Lines {
+			switch line.Kind {
+			case diff.Add:
+				add = true
+			case diff.Delete:
+				del = true
+			}
+		}
+		out[hunk.Header] = add != del
+	}
+	return out
 }
 
 func (p diffPane) Render(height int) string {
@@ -103,6 +144,7 @@ type splitRow struct {
 	oldAgainst string
 	newAgainst string
 	hunk       string
+	fullWidth  bool
 }
 
 func (p diffPane) renderSplit(height int) string {
@@ -176,9 +218,9 @@ func (p diffPane) splitRows(lines []displayLine, start int) []splitRow {
 		}
 		if dl.Line.Kind != diff.Delete {
 			if dl.Line.Kind == diff.Add {
-				rows = append(rows, splitRow{new: dl, oldIdx: -1, newIdx: idx})
+				rows = append(rows, splitRow{new: dl, oldIdx: -1, newIdx: idx, fullWidth: p.fullWidthHunks[dl.HunkHeader]})
 			} else {
-				rows = append(rows, splitRow{old: dl, new: dl, oldIdx: idx, newIdx: idx})
+				rows = append(rows, splitRow{old: dl, new: dl, oldIdx: idx, newIdx: idx, fullWidth: p.fullWidthHunks[dl.HunkHeader]})
 			}
 			continue
 		}
@@ -194,7 +236,7 @@ func (p diffPane) splitRows(lines []displayLine, start int) []splitRow {
 		}
 		addEnd := i
 		for j := 0; j < max(delEnd-delStart, addEnd-addStart); j++ {
-			row := splitRow{oldIdx: -1, newIdx: -1}
+			row := splitRow{oldIdx: -1, newIdx: -1, fullWidth: p.fullWidthHunks[dl.HunkHeader]}
 			if delStart+j < delEnd {
 				row.old = lines[delStart+j]
 				row.oldIdx = start + delStart + j
@@ -271,6 +313,9 @@ func (p diffPane) formatSplitRow(row splitRow, syntaxOK bool) string {
 	rangeGlyph := p.rangeGlyph(glyphIdx)
 	marker := p.splitRowMarker(row)
 	prefix := railCell(railGlyph(marker, rangeGlyph), selected, inRange) + gutterView(" ", selected, inRange)
+	if row.fullWidth {
+		return p.formatFullWidthSplitRow(row, prefix, marker, rangeGlyph, selected, inRange, syntaxOK)
+	}
 	fixed := 2 + 3
 	if !p.hideLineNumbers {
 		fixed += lineNoWidth + 1 + lineNoWidth + 1
@@ -292,6 +337,31 @@ func (p diffPane) formatSplitRow(row splitRow, syntaxOK bool) string {
 		return padRightStyled(truncate(line, p.width), p.width, selectedStyle)
 	}
 	return truncate(line, p.width)
+}
+
+func (p diffPane) formatFullWidthSplitRow(row splitRow, prefix, marker, rangeGlyph string, selected, inRange, syntaxOK bool) string {
+	line := row.new.Line
+	side := annotate.SideNew
+	if line == nil {
+		line = row.old.Line
+		side = annotate.SideOld
+	}
+	if line == nil {
+		return ""
+	}
+	rest := ""
+	if !p.hideLineNumbers {
+		lineNo, kind := splitLineNoAndKind(line, side)
+		rest += p.lineNoView(lineNo, kind, selected, inRange) + gutterView(" ", selected, inRange)
+	}
+	fixed := 2 + xansi.StringWidth(rest)
+	cellW := max(1, p.width-fixed)
+	rest += p.splitCellText(line, side, cellW, selected, inRange, syntaxOK, "")
+	if selected {
+		line := railCell(railGlyph(marker, rangeGlyph), true, inRange) + selectedStyle.Render(" ") + rest
+		return padRightStyled(truncate(line, p.width), p.width, selectedStyle)
+	}
+	return truncate(prefix+rest, p.width)
 }
 
 func splitLineNoAndKind(line *diff.Line, side annotate.Side) (string, diff.Kind) {

@@ -46,6 +46,82 @@ func TestDiffPaneRendersSplitView(t *testing.T) {
 	}
 }
 
+func TestDiffPaneSplitAddOnlyUsesFullWidth(t *testing.T) {
+	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: []diff.Line{
+		{Kind: diff.Add, NewNo: 1, Text: "+short text fills gap visibly"},
+	}}}}
+	store := &annotate.Store{}
+	m := Model{
+		store:       store,
+		annotations: annotations.NewWorkflow(store),
+		session:     review.NewSession([]diff.File{file}),
+		width:       80,
+		split:       true,
+		syntax:      false,
+		syntaxCache: make(map[string]string),
+	}
+
+	out := xansi.Strip(m.diffPane(44).Render(3))
+	if !strings.Contains(out, "fills gap") {
+		t.Fatalf("add-only split line did not use full width:\n%s", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "fills gap") && strings.Contains(line, "│") {
+			t.Fatalf("add-only full-width line still has split gap:\n%s", out)
+		}
+	}
+}
+
+func TestDiffPaneSplitDeleteOnlyUsesFullWidth(t *testing.T) {
+	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1 +0,0 @@", Lines: []diff.Line{
+		{Kind: diff.Delete, OldNo: 1, Text: "-short text fills gap visibly"},
+	}}}}
+	store := &annotate.Store{}
+	m := Model{
+		store:       store,
+		annotations: annotations.NewWorkflow(store),
+		session:     review.NewSession([]diff.File{file}),
+		width:       80,
+		split:       true,
+		syntax:      false,
+		syntaxCache: make(map[string]string),
+	}
+
+	out := xansi.Strip(m.diffPane(44).Render(3))
+	if !strings.Contains(out, "fills gap") {
+		t.Fatalf("delete-only split line did not use full width:\n%s", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "fills gap") && strings.Contains(line, "│") {
+			t.Fatalf("delete-only full-width line still has split gap:\n%s", out)
+		}
+	}
+}
+
+func TestDiffPaneSplitContextUsesFullWidthForAddOnlyHunk(t *testing.T) {
+	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1,2 @@", Lines: []diff.Line{
+		{Kind: diff.Context, OldNo: 1, NewNo: 1, Text: " context before fills gap visibly"},
+		{Kind: diff.Add, NewNo: 2, Text: "+short add"},
+	}}}}
+	store := &annotate.Store{}
+	m := Model{
+		store:       store,
+		annotations: annotations.NewWorkflow(store),
+		session:     review.NewSession([]diff.File{file}),
+		width:       80,
+		split:       true,
+		syntax:      false,
+		syntaxCache: make(map[string]string),
+	}
+
+	out := xansi.Strip(m.diffPane(44).Render(4))
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "context before") && strings.Contains(line, "│") {
+			t.Fatalf("pure-add hunk context still has split gap:\n%s", out)
+		}
+	}
+}
+
 func TestDiffPaneHidesUnifiedLineNumbers(t *testing.T) {
 	m := diffPaneTestModel(false)
 	m.hideLineNumbers = true

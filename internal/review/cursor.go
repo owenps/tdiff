@@ -2,6 +2,7 @@ package review
 
 import (
 	"github.com/owenps/tdiff/internal/annotate"
+	"github.com/owenps/tdiff/internal/annotationtarget"
 	"github.com/owenps/tdiff/internal/diff"
 )
 
@@ -257,7 +258,7 @@ func (c Cursor) AnnotationPositions(annotationsForPath func(string) []annotate.A
 		lines := c.displayLinesForFileIndex(fileIdx)
 		for _, annotation := range annotationsForPath(path) {
 			for lineIdx, dl := range lines {
-				if dl.Line != nil && AnnotationMatchesLine(annotation, *dl.Line) {
+				if dl.Line != nil && annotationtarget.MatchesLine(annotation, *dl.Line) {
 					out = append(out, AnnotationPosition{FileIdx: fileIdx, LineIdx: lineIdx, Annotation: annotation})
 					break
 				}
@@ -348,14 +349,6 @@ func displayLinesForFile(f *diff.File) []DisplayLine {
 		}
 	}
 	return out
-}
-
-func AnnotationMatchesLine(annotation annotate.Annotation, line diff.Line) bool {
-	lineNo := line.NewNo
-	if annotation.Side == annotate.SideOld {
-		lineNo = line.OldNo
-	}
-	return lineNo >= annotation.LineStart && lineNo <= annotation.LineEnd
 }
 
 func clamp(v, low, high int) int { return min(max(v, low), high) }

@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -62,6 +61,7 @@ type Model struct {
 	statusID            int
 	composerBaseView    string
 	syntaxCache         map[string]string
+	splitHunkCache      map[string]map[string]bool
 }
 
 func New(ctx context.Context, cfg Config) (Model, error) {
@@ -73,7 +73,7 @@ func New(ctx context.Context, cfg Config) (Model, error) {
 	if err != nil {
 		return Model{}, err
 	}
-	m := Model{repo: repo, cfg: cfg, store: store, annotations: annotations.NewWorkflow(store), session: review.NewSession(nil), syntax: true, contextDim: true, syntaxCache: make(map[string]string)}
+	m := Model{repo: repo, cfg: cfg, store: store, annotations: annotations.NewWorkflow(store), session: review.NewSession(nil), syntax: true, contextDim: true, syntaxCache: make(map[string]string), splitHunkCache: make(map[string]map[string]bool)}
 	m.session.SetStores(store, store)
 	m.editor = textarea.New()
 	m.editor.Placeholder = "annotation"
@@ -120,338 +120,19 @@ func loadingSpinnerTick() tea.Cmd {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if _, ok := msg.(loadingSpinnerTickMsg); ok {
-		if !m.ready() || m.prPicker.Loading() || m.prAttaching || m.refreshing {
-			m.loadingFrame++
-			return m, loadingSpinnerTick()
-		}
-		return m, nil
+	if next, cmd, ok := m.handleAsyncMsg(msg); ok {
+		return next, cmd
 	}
-	if msg, ok := msg.(prListLoadedMsg); ok {
-		if !m.prPicker.Active() {
-			return m, nil
-		}
-		attachedNumber := 0
-		if m.store != nil && m.store.GitHub != nil {
-			attachedNumber = m.store.GitHub.Number
-		}
-		m.prPicker.SetLoaded(msg.prs, msg.err, attachedNumber)
-		return m, nil
-	}
-	if msg, ok := msg.(prAttachLoadedMsg); ok {
-		previousStatus := m.status
-		m.prAttaching = false
-		if msg.err != nil {
-			m.status = msg.err.Error()
-			return m, m.statusToastCmd(previousStatus)
-		}
-		if err := m.store.AttachGitHubPR(msg.pr); err != nil {
-			m.status = err.Error()
-			return m, m.statusToastCmd(previousStatus)
-		}
-		if msg.threadErr != nil {
-			m.status = fmt.Sprintf("attached PR #%d · sync failed", msg.pr.Number)
-			return m, m.statusToastCmd(previousStatus)
-		}
-		count, err := m.store.SyncGitHubAnnotations(msg.pr, msg.threads)
-		if err != nil {
-			m.status = err.Error()
-			return m, m.statusToastCmd(previousStatus)
-		}
-		m.session.RefreshFilters()
-		m.status = fmt.Sprintf("attached PR #%d · %d annotations", msg.pr.Number, count)
-		return m, m.statusToastCmd(previousStatus)
-	}
-	if msg, ok := msg.(refreshLoadedMsg); ok {
-		previousStatus := m.status
-		m.refreshing = false
-		if msg.err != nil {
-			m.status = msg.err.Error()
-			return m, m.statusToastCmd(previousStatus)
-		}
-		m.compareTarget = msg.compareTarget
-		m.session.SetSnapshot(msg.snap.Files, msg.snap.Hash)
-		m.syntaxCache = make(map[string]string)
-		if msg.offline {
-			m.status = "diff refreshed · offline"
-			return m, m.statusToastCmd(previousStatus)
-		}
-		if msg.noPR || msg.pr == nil {
-			m.status = "diff refreshed · no PR"
-			return m, m.statusToastCmd(previousStatus)
-		}
-		if err := m.store.AttachGitHubPR(*msg.pr); err != nil {
-			m.status = err.Error()
-			return m, m.statusToastCmd(previousStatus)
-		}
-		if msg.threadErr != nil {
-			m.status = "diff refreshed · github sync failed"
-			return m, m.statusToastCmd(previousStatus)
-		}
-		count, err := m.store.SyncGitHubAnnotations(*msg.pr, msg.threads)
-		if err != nil {
-			m.status = err.Error()
-			return m, m.statusToastCmd(previousStatus)
-		}
-		m.session.RefreshFilters()
-		m.status = fmt.Sprintf("PR #%d synced · %d annotations", msg.pr.Number, count)
-		return m, m.statusToastCmd(previousStatus)
-	}
-	if msg, ok := msg.(clearStatusMsg); ok {
-		if msg.id == m.statusID {
-			m.status = ""
-		}
-		return m, nil
+	if m.composing {
+		return m.updateComposer(msg)
 	}
 
 	previousStatus := m.status
-	if m.composing {
-		switch msg := msg.(type) {
-		case tea.KeyMsg:
-			switch msg.String() {
-			case "alt+enter":
-				if err := m.saveAnnotation(); err != nil {
-					m.status = err.Error()
-				} else {
-					m.status = "annotation saved"
-					m.composing = false
-					m.composerBaseView = ""
-					m.session.CancelRange()
-					m.editingAnnotationID = ""
-					m.pendingTarget = annotations.Target{}
-					m.editor.Blur()
-					m.editor.Reset()
-				}
-				return m, m.statusToastCmd(previousStatus)
-			case "esc":
-				m.composing = false
-				m.composerBaseView = ""
-				m.session.CancelRange()
-				m.editingAnnotationID = ""
-				m.pendingTarget = annotations.Target{}
-				m.editor.Blur()
-				m.editor.Reset()
-				return m, nil
-			}
-		}
-		var cmd tea.Cmd
-		m.editor, cmd = m.editor.Update(msg)
-		return m, cmd
-	}
-
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		m.editor.SetWidth(max(20, msg.Width-32))
-		m.ensureCursorVisible()
+		m.updateWindowSize(msg)
 	case tea.KeyMsg:
-		if m.prPicker.Active() {
-			return m.updatePRPicker(msg)
-		}
-		if m.jumpPrompt {
-			return m.updateJumpPrompt(msg)
-		}
-
-		switch msg.String() {
-		case "q", "ctrl+c":
-			return m, tea.Quit
-		case "?":
-			m.pendingKey = ""
-			m.showHelp = !m.showHelp
-			m.ensureCursorVisible()
-		case ":":
-			m.pendingKey = ""
-			m.jumpPrompt = true
-			m.jumpInput = ""
-		case "#":
-			m.pendingKey = ""
-			return m, m.openPRPicker()
-		case "g":
-			if m.pendingKey == "g" {
-				m.pendingKey = ""
-				m.jumpTop()
-			} else {
-				m.pendingKey = "g"
-			}
-		case "G":
-			m.pendingKey = ""
-			m.jumpBottom()
-		case "[", "]":
-			m.pendingKey = msg.String()
-		case "h":
-			if m.pendingKey == "[" {
-				m.pendingKey = ""
-				m.prevHunk()
-			} else if m.pendingKey == "]" {
-				m.pendingKey = ""
-				m.nextHunk()
-			}
-		case "j", "down":
-			m.pendingKey = ""
-			m.session.MoveLine(1, m.bodyHeight())
-		case "k", "up":
-			m.pendingKey = ""
-			m.session.MoveLine(-1, m.bodyHeight())
-		case "n", "right":
-			m.pendingKey = ""
-			m.session.MoveFile(1)
-		case "p", "left":
-			m.pendingKey = ""
-			m.session.MoveFile(-1)
-		case "s":
-			m.pendingKey = ""
-			m.split = !m.split
-		case "x":
-			m.pendingKey = ""
-			m.syntax = !m.syntax
-			m.status = fmt.Sprintf("syntax: %t", m.syntax)
-		case "c":
-			m.pendingKey = ""
-			m.contextDim = !m.contextDim
-			m.status = fmt.Sprintf("context dim: %t", m.contextDim)
-		case "u":
-			m.pendingKey = ""
-			m.status = fmt.Sprintf("hide viewed: %t", m.session.ToggleHideViewed())
-		case "m":
-			m.pendingKey = ""
-			m.status = fmt.Sprintf("annotations only: %t", m.session.ToggleAnnotationsOnly())
-		case "b":
-			m.pendingKey = ""
-			m.hideSidebar = !m.hideSidebar
-			m.status = fmt.Sprintf("sidebar: %t", !m.hideSidebar)
-		case "y":
-			m.pendingKey = ""
-			if annotation, ok := m.selectedAnnotation(); ok {
-				if err := clipboard.WriteAll(annotationMarkdown(annotation)); err != nil {
-					m.status = err.Error()
-				} else {
-					m.status = "annotation copied"
-				}
-			} else {
-				m.status = "no annotation on selected line"
-			}
-		case "Y":
-			m.pendingKey = ""
-			if err := clipboard.WriteAll(m.store.ExportMarkdown()); err != nil {
-				m.status = err.Error()
-			} else {
-				m.status = "annotations copied"
-			}
-		case "w":
-			m.pendingKey = ""
-			m.wrapCursorLine = !m.wrapCursorLine
-			m.status = fmt.Sprintf("wrap cursor line: %t", m.wrapCursorLine)
-		case "L":
-			m.pendingKey = ""
-			m.hideLineNumbers = !m.hideLineNumbers
-			m.status = fmt.Sprintf("line numbers: %t", !m.hideLineNumbers)
-		case "W":
-			m.pendingKey = ""
-			m.cfg.IgnoreWhitespace = !m.cfg.IgnoreWhitespace
-			if err := m.reload(context.Background()); err != nil {
-				m.status = err.Error()
-			} else {
-				m.status = fmt.Sprintf("ignore whitespace: %t", m.cfg.IgnoreWhitespace)
-			}
-		case "R":
-			m.pendingKey = ""
-			if m.refreshing {
-				m.status = "refreshing…"
-				break
-			}
-			m.refreshing = true
-			m.status = "refreshing…"
-			return m, tea.Batch(m.refreshProjectCmd(), loadingSpinnerTick())
-		case "v":
-			m.pendingKey = ""
-			result, err := m.session.ToggleViewed()
-			if err != nil {
-				m.status = err.Error()
-				break
-			}
-			if result.Path != "" {
-				if !result.Viewed {
-					m.status = "unmarked viewed"
-				} else if m.session.HideViewed() || result.Advanced {
-					m.status = "marked viewed"
-				} else {
-					m.status = "marked viewed; no next unviewed file"
-				}
-			}
-		case "r":
-			m.pendingKey = ""
-			result := m.session.ToggleRange()
-			if result.Cancelled {
-				m.status = "range cancelled"
-			} else if result.Started {
-				m.status = "range started; move then press a"
-			} else {
-				m.status = "range must start on a diff line"
-			}
-		case "a":
-			if m.pendingKey == "[" {
-				m.pendingKey = ""
-				m.prevAnnotation()
-				break
-			}
-			if m.pendingKey == "]" {
-				m.pendingKey = ""
-				m.nextAnnotation()
-				break
-			}
-			m.pendingKey = ""
-			if m.session.RangeActive() {
-				target, err := m.rangeTarget()
-				if err != nil {
-					m.status = err.Error()
-					break
-				}
-				m.startNewAnnotation(target)
-				return m, textarea.Blink
-			}
-			if annotation, ok := m.selectedAnnotation(); ok {
-				if annotation.Source == annotate.SourceGitHub {
-					m.status = "github annotation readonly"
-					break
-				}
-				m.startEditAnnotation(annotation)
-				return m, textarea.Blink
-			}
-			if target, err := m.singleLineTarget(); err == nil {
-				m.startNewAnnotation(target)
-				return m, textarea.Blink
-			}
-		case "e":
-			m.pendingKey = ""
-			if annotation, ok := m.selectedAnnotation(); ok {
-				if annotation.Source == annotate.SourceGitHub {
-					m.status = "github annotation readonly"
-					break
-				}
-				m.startEditAnnotation(annotation)
-				return m, textarea.Blink
-			}
-			m.status = "no annotation on selected line"
-		case "d":
-			m.pendingKey = ""
-			if annotation, ok := m.selectedAnnotation(); ok {
-				if annotation.Source == annotate.SourceGitHub {
-					m.status = "github annotation readonly"
-					break
-				}
-				if err := m.annotations.Delete(annotation.ID); err != nil {
-					m.status = err.Error()
-				} else {
-					m.status = "annotation deleted"
-					if m.session.AnnotationsOnly() {
-						m.session.RefreshFilters()
-					}
-				}
-				break
-			}
-			m.status = "no annotation on selected line"
-		}
+		return m.updateKey(msg, previousStatus)
 	}
 	return m, m.statusToastCmd(previousStatus)
 }
@@ -524,6 +205,7 @@ func (m *Model) reload(ctx context.Context) error {
 	m.compareTarget = compareTarget
 	m.session.SetSnapshot(s.Files, s.Hash)
 	m.syntaxCache = make(map[string]string)
+	m.splitHunkCache = make(map[string]map[string]bool)
 	return nil
 }
 

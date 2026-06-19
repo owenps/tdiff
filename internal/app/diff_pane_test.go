@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/owenps/tdiff/internal/annotate"
 	"github.com/owenps/tdiff/internal/annotations"
@@ -42,6 +43,46 @@ func TestDiffPaneRendersSplitView(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("split diff missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestDiffPaneHidesUnifiedLineNumbers(t *testing.T) {
+	m := diffPaneTestModel(false)
+	m.hideLineNumbers = true
+
+	out := xansi.Strip(m.renderDiff(4))
+	if strings.Contains(out, "   1") {
+		t.Fatalf("unified diff still shows line numbers:\n%s", out)
+	}
+	for _, want := range []string{"- old", "+ new"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("unified diff missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestDiffPaneHidesSplitLineNumbers(t *testing.T) {
+	m := diffPaneTestModel(true)
+	m.hideLineNumbers = true
+
+	out := xansi.Strip(m.renderDiff(4))
+	if strings.Contains(out, "   1") {
+		t.Fatalf("split diff still shows line numbers:\n%s", out)
+	}
+	for _, want := range []string{"│", "old", "new"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("split diff missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestLineNumberKeybindToggles(t *testing.T) {
+	m := diffPaneTestModel(false)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'L'}})
+	got := updated.(Model)
+	if !got.hideLineNumbers || got.status != "line numbers: false" {
+		t.Fatalf("L toggle = hideLineNumbers %t status %q", got.hideLineNumbers, got.status)
 	}
 }
 

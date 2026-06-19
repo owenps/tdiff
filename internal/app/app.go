@@ -48,6 +48,7 @@ type Model struct {
 	syntax              bool
 	contextDim          bool
 	wrapCursorLine      bool
+	hideLineNumbers     bool
 	showHelp            bool
 	hideSidebar         bool
 	composing           bool
@@ -86,7 +87,7 @@ func New(ctx context.Context, cfg Config) (Model, error) {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(textarea.Blink, loadingSpinnerTick(), tea.SetWindowTitle("∓"))
+	return tea.Batch(textarea.Blink, loadingSpinnerTick(), tea.SetWindowTitle("∓ tdiff"))
 }
 
 type clearStatusMsg struct{ id int }
@@ -341,6 +342,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingKey = ""
 			m.wrapCursorLine = !m.wrapCursorLine
 			m.status = fmt.Sprintf("wrap cursor line: %t", m.wrapCursorLine)
+		case "L":
+			m.pendingKey = ""
+			m.hideLineNumbers = !m.hideLineNumbers
+			m.status = fmt.Sprintf("line numbers: %t", !m.hideLineNumbers)
 		case "W":
 			m.pendingKey = ""
 			m.cfg.IgnoreWhitespace = !m.cfg.IgnoreWhitespace
@@ -1227,6 +1232,7 @@ func (m Model) renderHelp() string {
 		"  x          syntax highlighting",
 		"  c          context dimming",
 		"  w          wrap cursor line",
+		"  L          line numbers",
 		"  W          whitespace",
 		"  R          refresh diff",
 		"  ?          close help",

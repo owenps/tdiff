@@ -23,6 +23,7 @@ type diffPane struct {
 	syntax          bool
 	contextDim      bool
 	wrapCursorLine  bool
+	hideLineNumbers bool
 	syntaxCache     map[string]string
 	session         review.Session
 	workflow        annotations.Workflow
@@ -50,6 +51,7 @@ func (m Model) diffPane(width int) diffPane {
 		syntax:          m.syntax,
 		contextDim:      m.contextDim,
 		wrapCursorLine:  m.wrapCursorLine,
+		hideLineNumbers: m.hideLineNumbers,
 		syntaxCache:     m.syntaxCache,
 		session:         m.session,
 		workflow:        m.annotations,
@@ -269,12 +271,21 @@ func (p diffPane) formatSplitRow(row splitRow, syntaxOK bool) string {
 	rangeGlyph := p.rangeGlyph(glyphIdx)
 	marker := p.splitRowMarker(row)
 	prefix := railCell(railGlyph(marker, rangeGlyph), selected, inRange) + gutterView(" ", selected, inRange)
-	fixed := 2 + lineNoWidth + 1 + 3 + lineNoWidth + 1
+	fixed := 2 + 3
+	if !p.hideLineNumbers {
+		fixed += lineNoWidth + 1 + lineNoWidth + 1
+	}
 	leftW := max(1, (p.width-fixed)/2)
 	rightW := max(1, p.width-fixed-leftW)
-	oldNo, oldKind := splitLineNoAndKind(row.old.Line, annotate.SideOld)
-	newNo, newKind := splitLineNoAndKind(row.new.Line, annotate.SideNew)
-	rest := p.lineNoView(oldNo, oldKind, selected, inRange) + gutterView(" ", selected, inRange) + p.splitCellText(row.old.Line, annotate.SideOld, leftW, selected, inRange, syntaxOK, row.oldAgainst) + gutterView(" │ ", selected, inRange) + p.lineNoView(newNo, newKind, selected, inRange) + gutterView(" ", selected, inRange) + p.splitCellText(row.new.Line, annotate.SideNew, rightW, selected, inRange, syntaxOK, row.newAgainst)
+	oldPrefix := ""
+	newPrefix := ""
+	if !p.hideLineNumbers {
+		oldNo, oldKind := splitLineNoAndKind(row.old.Line, annotate.SideOld)
+		newNo, newKind := splitLineNoAndKind(row.new.Line, annotate.SideNew)
+		oldPrefix = p.lineNoView(oldNo, oldKind, selected, inRange) + gutterView(" ", selected, inRange)
+		newPrefix = p.lineNoView(newNo, newKind, selected, inRange) + gutterView(" ", selected, inRange)
+	}
+	rest := oldPrefix + p.splitCellText(row.old.Line, annotate.SideOld, leftW, selected, inRange, syntaxOK, row.oldAgainst) + gutterView(" │ ", selected, inRange) + newPrefix + p.splitCellText(row.new.Line, annotate.SideNew, rightW, selected, inRange, syntaxOK, row.newAgainst)
 	line := prefix + rest
 	if selected {
 		line = railCell(railGlyph(marker, rangeGlyph), true, inRange) + selectedStyle.Render(" ") + rest
@@ -348,15 +359,19 @@ func (p diffPane) splitRowMarker(row splitRow) string {
 }
 
 func (p diffPane) formatUnifiedLine(l diff.Line, marker string, selected, inRange bool, rangeGlyph string, syntaxOK bool, intralineAgainst string) string {
-	oldNo := lineNoText(l.OldNo)
-	newNo := lineNoText(l.NewNo)
 	diffSign, body := diffMarkerBody(l.Text)
 	prefix := railCell(railGlyph(marker, rangeGlyph), selected, inRange) + gutterView(" ", selected, inRange)
 	bodyView := p.diffTextView(l.Kind, body, selected, inRange, syntaxOK)
 	if intralineAgainst != "" && (l.Kind == diff.Add || l.Kind == diff.Delete) {
 		bodyView = p.intralineTextView(l.Kind, body, intralineAgainst, selected, inRange, syntaxOK)
 	}
-	restPrefix := p.lineNoView(oldNo, l.Kind, selected, inRange) + gutterView(" ", selected, inRange) + p.lineNoView(newNo, l.Kind, selected, inRange) + gutterView(" ", selected, inRange) + diffSignView(diffSign, l.Kind, selected, inRange) + gutterView(" ", selected, inRange)
+	restPrefix := ""
+	if !p.hideLineNumbers {
+		oldNo := lineNoText(l.OldNo)
+		newNo := lineNoText(l.NewNo)
+		restPrefix += p.lineNoView(oldNo, l.Kind, selected, inRange) + gutterView(" ", selected, inRange) + p.lineNoView(newNo, l.Kind, selected, inRange) + gutterView(" ", selected, inRange)
+	}
+	restPrefix += diffSignView(diffSign, l.Kind, selected, inRange) + gutterView(" ", selected, inRange)
 	if selected {
 		linePrefix := railCell(railGlyph(marker, rangeGlyph), true, inRange) + selectedStyle.Render(" ") + restPrefix
 		if p.wrapCursorLine {

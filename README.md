@@ -80,6 +80,7 @@ This includes annotations and viewed-file state.
 - <kbd>x</kbd> toggle syntax highlighting
 - <kbd>c</kbd> toggle context dimming
 - <kbd>w</kbd> wrap cursor line
+- <kbd>L</kbd> toggle line numbers
 - <kbd>r</kbd> start/cancel line range
 - <kbd>a</kbd> annotate selected line/range; edits existing annotation on selected line
 - <kbd>e</kbd> edit annotation on selected line/range

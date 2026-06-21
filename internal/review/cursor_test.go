@@ -3,8 +3,8 @@ package review
 import (
 	"testing"
 
-	"github.com/owenps/tdiff/internal/annotate"
 	"github.com/owenps/tdiff/internal/diff"
+	"github.com/owenps/tdiff/internal/thread"
 )
 
 func TestCursorJumpsHunksAndLines(t *testing.T) {
@@ -39,16 +39,16 @@ func TestCursorRangeLines(t *testing.T) {
 	}
 }
 
-func TestCursorFiltersViewedAndAnnotationsOnly(t *testing.T) {
+func TestCursorFiltersViewedAndThreadsOnly(t *testing.T) {
 	files := []diff.File{{NewPath: "a.go"}, {NewPath: "b.go"}, {NewPath: "c.go"}}
 	filtered := FilterFiles(files, FileFilter{
-		HideViewed:      true,
-		AnnotationsOnly: true,
-		DiffHash:        "hash",
+		HideViewed:  true,
+		ThreadsOnly: true,
+		DiffHash:    "hash",
 		IsViewed: func(path, diffHash string) bool {
 			return path == "a.go" && diffHash == "hash"
 		},
-		AnnotationCount: func(path string) int {
+		ThreadCount: func(path string) int {
 			if path == "b.go" {
 				return 1
 			}
@@ -60,18 +60,18 @@ func TestCursorFiltersViewedAndAnnotationsOnly(t *testing.T) {
 	}
 }
 
-func TestCursorJumpsAnnotations(t *testing.T) {
+func TestCursorJumpsThreads(t *testing.T) {
 	c := NewCursor([]diff.File{
 		{NewPath: "a.go", Hunks: []diff.Hunk{{Header: "@@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 1}}}}},
 		{NewPath: "b.go", Hunks: []diff.Hunk{{Header: "@@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 2}}}}},
 	})
-	annotationsForPath := func(path string) []annotate.Annotation {
+	threadsForPath := func(path string) []thread.Thread {
 		if path == "b.go" {
-			return []annotate.Annotation{{ID: "n1", Path: path, Side: annotate.SideNew, LineStart: 2, LineEnd: 2}}
+			return []thread.Thread{{ID: "n1", Path: path, Side: thread.SideNew, LineStart: 2, LineEnd: 2}}
 		}
 		return nil
 	}
-	idx, total, ok := c.JumpAnnotation(1, 10, annotationsForPath)
+	idx, total, ok := c.JumpThread(1, 10, threadsForPath)
 	if !ok || idx != 1 || total != 1 || c.FileIndex() != 1 || c.LineIndex() != 1 {
 		t.Fatalf("idx=%d total=%d ok=%t file=%d line=%d", idx, total, ok, c.FileIndex(), c.LineIndex())
 	}

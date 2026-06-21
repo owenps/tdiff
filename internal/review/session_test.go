@@ -3,17 +3,17 @@ package review
 import (
 	"testing"
 
-	"github.com/owenps/tdiff/internal/annotate"
 	"github.com/owenps/tdiff/internal/diff"
+	"github.com/owenps/tdiff/internal/thread"
 )
 
 type fakeViewedStore struct {
 	viewed map[string]string
 }
 
-type fakeAnnotationStore map[string][]annotate.Annotation
+type fakeThreadStore map[string][]thread.Thread
 
-func (s fakeAnnotationStore) AnnotationsFor(path string) []annotate.Annotation {
+func (s fakeThreadStore) ThreadsFor(path string) []thread.Thread {
 	return s[path]
 }
 
@@ -37,7 +37,7 @@ func (s *fakeViewedStore) IsViewed(path, diffHash string) bool {
 func TestSessionFiltersSnapshotFiles(t *testing.T) {
 	s := NewSession(nil)
 	viewed := &fakeViewedStore{viewed: map[string]string{"a.go": "hash"}}
-	s.SetStores(viewed, fakeAnnotationStore{"b.go": []annotate.Annotation{{Path: "b.go", Side: annotate.SideNew, LineStart: 1, LineEnd: 1}}})
+	s.SetStores(viewed, fakeThreadStore{"b.go": []thread.Thread{{Path: "b.go", Side: thread.SideNew, LineStart: 1, LineEnd: 1}}})
 	s.SetSnapshot([]diff.File{{NewPath: "a.go"}, {NewPath: "b.go"}, {NewPath: "c.go"}}, "hash")
 	s.SetFilters(true, true)
 
@@ -80,14 +80,14 @@ func TestSessionLineWindowOwnsRangeGlyphs(t *testing.T) {
 	}
 }
 
-func TestSessionSelectedAnnotationUsesStore(t *testing.T) {
+func TestSessionSelectedThreadUsesStore(t *testing.T) {
 	s := NewSession([]diff.File{{NewPath: "a.go", Hunks: []diff.Hunk{{Header: "@@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 7, Text: "+new"}}}}}})
-	s.SetStores(nil, fakeAnnotationStore{"a.go": []annotate.Annotation{{ID: "n1", Path: "a.go", Side: annotate.SideNew, LineStart: 7, LineEnd: 7}}})
+	s.SetStores(nil, fakeThreadStore{"a.go": []thread.Thread{{ID: "n1", Path: "a.go", Side: thread.SideNew, LineStart: 7, LineEnd: 7}}})
 	s.MoveLine(1, 10)
 
-	annotation, ok := s.SelectedAnnotation()
-	if !ok || annotation.ID != "n1" {
-		t.Fatalf("annotation=%+v ok=%t", annotation, ok)
+	thread, ok := s.SelectedThread()
+	if !ok || thread.ID != "n1" {
+		t.Fatalf("thread=%+v ok=%t", thread, ok)
 	}
 }
 

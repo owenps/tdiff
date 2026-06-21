@@ -1,20 +1,20 @@
-package annotations
+package threadworkflow
 
 import (
 	"fmt"
 	"strings"
 
-	"github.com/owenps/tdiff/internal/annotate"
-	"github.com/owenps/tdiff/internal/annotationtarget"
 	"github.com/owenps/tdiff/internal/diff"
 	"github.com/owenps/tdiff/internal/review"
+	"github.com/owenps/tdiff/internal/thread"
+	"github.com/owenps/tdiff/internal/threadtarget"
 )
 
 type Store interface {
-	Add(annotate.Annotation) error
-	UpdateBody(id, body string) error
+	Add(thread.Thread) error
+	UpdateFirstMessage(id, body string) error
 	Delete(id string) error
-	AnnotationsFor(path string) []annotate.Annotation
+	ThreadsFor(path string) []thread.Thread
 }
 
 type Workflow struct {
@@ -22,7 +22,7 @@ type Workflow struct {
 }
 
 type Target struct {
-	Side       annotate.Side
+	Side       thread.Side
 	LineStart  int
 	LineEnd    int
 	HunkHeader string
@@ -39,7 +39,7 @@ func NewWorkflow(store Store) Workflow {
 }
 
 func (w Workflow) TargetForLine(dl DiffLine) (Target, error) {
-	side, line, ok := annotationtarget.ForLine(dl.Line)
+	side, line, ok := threadtarget.ForLine(dl.Line)
 	if !ok {
 		return Target{}, fmt.Errorf("no line selected")
 	}
@@ -68,7 +68,7 @@ func (w Workflow) TargetForRange(lines []DiffLine) (Target, error) {
 	var target Target
 	var context []string
 	for _, dl := range lines {
-		side, line, ok := annotationtarget.ForLine(dl.Line)
+		side, line, ok := threadtarget.ForLine(dl.Line)
 		if !ok {
 			continue
 		}
@@ -92,27 +92,27 @@ func (w Workflow) TargetForRange(lines []DiffLine) (Target, error) {
 	return target, nil
 }
 
-func (w Workflow) AnnotationAt(path string, line diff.Line) (annotate.Annotation, bool) {
-	side, _, ok := annotationtarget.ForLine(line)
+func (w Workflow) ThreadAt(path string, line diff.Line) (thread.Thread, bool) {
+	side, _, ok := threadtarget.ForLine(line)
 	if !ok {
-		return annotate.Annotation{}, false
+		return thread.Thread{}, false
 	}
-	for _, n := range w.store.AnnotationsFor(path) {
-		if n.Side == side && annotationtarget.MatchesLine(n, line) {
+	for _, n := range w.store.ThreadsFor(path) {
+		if n.Side == side && threadtarget.MatchesLine(n, line) {
 			return n, true
 		}
 	}
-	return annotate.Annotation{}, false
+	return thread.Thread{}, false
 }
 
-func (w Workflow) MarkerFor(annotation annotate.Annotation, line diff.Line) string {
+func (w Workflow) MarkerFor(t thread.Thread, line diff.Line) string {
 	lineNo := 0
-	if annotation.Side == annotate.SideNew {
+	if t.Side == thread.SideNew {
 		lineNo = line.NewNo
 	} else {
 		lineNo = line.OldNo
 	}
-	start, end := annotationtarget.Range(annotation)
+	start, end := threadtarget.Range(t)
 	if lineNo == 0 || lineNo < start || lineNo > end {
 		return ""
 	}
@@ -128,18 +128,18 @@ func (w Workflow) MarkerFor(annotation annotate.Annotation, line diff.Line) stri
 func (w Workflow) Save(path, diffHash, editingID string, target Target, body string) error {
 	body = strings.TrimSpace(body)
 	if body == "" {
-		return fmt.Errorf("empty annotation")
+		return fmt.Errorf("empty thread")
 	}
 	if editingID != "" {
-		return w.store.UpdateBody(editingID, body)
+		return w.store.UpdateFirstMessage(editingID, body)
 	}
 	if target.LineStart == 0 {
-		return fmt.Errorf("no annotation target")
+		return fmt.Errorf("no thread target")
 	}
 	if w.overlapsExisting(path, target) {
-		return fmt.Errorf("annotation overlaps existing annotation")
+		return fmt.Errorf("thread overlaps existing thread")
 	}
-	return w.store.Add(annotate.Annotation{
+	return w.store.Add(thread.Thread{
 		Path:       path,
 		Side:       target.Side,
 		Line:       target.LineStart,
@@ -147,7 +147,7 @@ func (w Workflow) Save(path, diffHash, editingID string, target Target, body str
 		LineEnd:    target.LineEnd,
 		HunkHeader: target.HunkHeader,
 		Context:    target.Context,
-		Body:       body,
+		Messages:   []thread.Message{{Actor: thread.ActorHuman, Body: body}},
 		DiffHash:   diffHash,
 	})
 }
@@ -162,12 +162,12 @@ func (w Workflow) overlapsExisting(path string, target Target) bool {
 	if end == 0 {
 		end = start
 	}
-	for _, n := range w.store.AnnotationsFor(path) {
+	for _, n := range w.store.ThreadsFor(path) {
 		if n.Side != target.Side {
 			continue
 		}
-		annotationStart, annotationEnd := annotationtarget.Range(n)
-		if start <= annotationEnd && annotationStart <= end {
+		threadStart, threadEnd := threadtarget.Range(n)
+		if start <= threadEnd && threadStart <= end {
 			return true
 		}
 	}

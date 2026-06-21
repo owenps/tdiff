@@ -6,10 +6,10 @@ import (
 	"testing"
 
 	xansi "github.com/charmbracelet/x/ansi"
-	"github.com/owenps/tdiff/internal/annotate"
-	"github.com/owenps/tdiff/internal/annotations"
 	"github.com/owenps/tdiff/internal/diff"
 	"github.com/owenps/tdiff/internal/review"
+	"github.com/owenps/tdiff/internal/thread"
+	"github.com/owenps/tdiff/internal/threadworkflow"
 )
 
 func TestSidebarStatTruncatesThousands(t *testing.T) {
@@ -43,31 +43,31 @@ func TestRenderSidebarUsesCompactedStats(t *testing.T) {
 	}
 }
 
-func TestRenderSidebarGivesAnnotationsMoreRoomWhenScreenPermits(t *testing.T) {
+func TestRenderSidebarGivesThreadsMoreRoomWhenScreenPermits(t *testing.T) {
 	var files []diff.File
-	var notes []annotate.Annotation
+	var notes []thread.Thread
 	for i := 1; i <= 4; i++ {
 		path := fmt.Sprintf("file%d.go", i)
 		files = append(files, diff.File{NewPath: path, Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+new"}}}}})
-		notes = append(notes, annotate.Annotation{ID: fmt.Sprintf("n%d", i), Path: path, Side: annotate.SideNew, LineStart: 1, LineEnd: 1, Body: fmt.Sprintf("note %d", i)})
+		notes = append(notes, thread.Thread{ID: fmt.Sprintf("n%d", i), Path: path, Side: thread.SideNew, LineStart: 1, LineEnd: 1, Messages: []thread.Message{{Actor: thread.ActorHuman, Body: fmt.Sprintf("note %d", i)}}})
 	}
-	store := &annotate.Store{Annotations: notes}
-	workflow := annotations.NewWorkflow(store)
+	store := &thread.Store{Threads: notes}
+	workflow := threadworkflow.NewWorkflow(store)
 	session := review.NewSession(files)
 	session.SetStores(store, store)
-	m := Model{store: store, annotations: workflow, session: session, width: 100}
+	m := Model{store: store, threads: workflow, session: session, width: 100}
 
 	out := xansi.Strip(m.renderSidebar(30))
 	if !strings.Contains(out, "note 4") {
-		t.Fatalf("sidebar annotation preview too short:\n%s", out)
+		t.Fatalf("sidebar thread preview too short:\n%s", out)
 	}
 }
 
-func TestSidebarAnnotationHeightUsesBoundedScreenRatio(t *testing.T) {
-	if got := sidebarAnnotationHeight(20, 20); got != 10 {
+func TestSidebarThreadHeightUsesBoundedScreenRatio(t *testing.T) {
+	if got := sidebarThreadHeight(20, 20); got != 10 {
 		t.Fatalf("height = %d, want 10", got)
 	}
-	if got := sidebarAnnotationHeight(80, 20); got != sidebarAnnotationMaxRows {
-		t.Fatalf("height = %d, want %d", got, sidebarAnnotationMaxRows)
+	if got := sidebarThreadHeight(80, 20); got != sidebarThreadMaxRows {
+		t.Fatalf("height = %d, want %d", got, sidebarThreadMaxRows)
 	}
 }

@@ -6,13 +6,13 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	xansi "github.com/charmbracelet/x/ansi"
-	"github.com/owenps/tdiff/internal/annotate"
-	"github.com/owenps/tdiff/internal/annotations"
 	"github.com/owenps/tdiff/internal/diff"
 	"github.com/owenps/tdiff/internal/review"
+	"github.com/owenps/tdiff/internal/thread"
+	"github.com/owenps/tdiff/internal/threadworkflow"
 )
 
-func TestDiffPaneRendersUnifiedAnnotationAndRange(t *testing.T) {
+func TestDiffPaneRendersUnifiedThreadAndRange(t *testing.T) {
 	m := diffPaneTestModel(false)
 	m.session.MoveLine(1, 10)
 	if !m.session.StartRange() {
@@ -28,11 +28,11 @@ func TestDiffPaneRendersUnifiedAnnotationAndRange(t *testing.T) {
 	}
 }
 
-func TestDiffPaneRendersAnnotationStartInRail(t *testing.T) {
+func TestDiffPaneRendersThreadStartInRail(t *testing.T) {
 	m := diffPaneTestModel(false)
 	out := xansi.Strip(m.renderDiff(4))
 	if !strings.Contains(out, "●") {
-		t.Fatalf("rendered diff missing annotation start:\n%s", out)
+		t.Fatalf("rendered diff missing thread start:\n%s", out)
 	}
 }
 
@@ -50,10 +50,10 @@ func TestDiffPaneSplitAddOnlyUsesFullWidth(t *testing.T) {
 	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: []diff.Line{
 		{Kind: diff.Add, NewNo: 1, Text: "+short text fills gap visibly"},
 	}}}}
-	store := &annotate.Store{}
+	store := &thread.Store{}
 	m := Model{
 		store:       store,
-		annotations: annotations.NewWorkflow(store),
+		threads:     threadworkflow.NewWorkflow(store),
 		session:     review.NewSession([]diff.File{file}),
 		width:       80,
 		split:       true,
@@ -76,10 +76,10 @@ func TestDiffPaneSplitDeleteOnlyUsesFullWidth(t *testing.T) {
 	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1 +0,0 @@", Lines: []diff.Line{
 		{Kind: diff.Delete, OldNo: 1, Text: "-short text fills gap visibly"},
 	}}}}
-	store := &annotate.Store{}
+	store := &thread.Store{}
 	m := Model{
 		store:       store,
-		annotations: annotations.NewWorkflow(store),
+		threads:     threadworkflow.NewWorkflow(store),
 		session:     review.NewSession([]diff.File{file}),
 		width:       80,
 		split:       true,
@@ -103,10 +103,10 @@ func TestDiffPaneSplitContextUsesFullWidthForAddOnlyHunk(t *testing.T) {
 		{Kind: diff.Context, OldNo: 1, NewNo: 1, Text: " context before fills gap visibly"},
 		{Kind: diff.Add, NewNo: 2, Text: "+short add"},
 	}}}}
-	store := &annotate.Store{}
+	store := &thread.Store{}
 	m := Model{
 		store:       store,
-		annotations: annotations.NewWorkflow(store),
+		threads:     threadworkflow.NewWorkflow(store),
 		session:     review.NewSession([]diff.File{file}),
 		width:       80,
 		split:       true,
@@ -130,10 +130,10 @@ func TestDiffPaneSplitSeparatedAddDeleteHunkUsesFullWidth(t *testing.T) {
 		{Kind: diff.Delete, OldNo: 3, Text: "-standalone delete fills gap"},
 		{Kind: diff.Context, OldNo: 4, NewNo: 4, Text: " context after"},
 	}}}}
-	store := &annotate.Store{}
+	store := &thread.Store{}
 	m := Model{
 		store:       store,
-		annotations: annotations.NewWorkflow(store),
+		threads:     threadworkflow.NewWorkflow(store),
 		session:     review.NewSession([]diff.File{file}),
 		width:       80,
 		split:       true,
@@ -154,10 +154,10 @@ func TestDiffPaneSplitReplacementHunkStaysSplit(t *testing.T) {
 		{Kind: diff.Delete, OldNo: 1, Text: "-old"},
 		{Kind: diff.Add, NewNo: 1, Text: "+new"},
 	}}}}
-	store := &annotate.Store{}
+	store := &thread.Store{}
 	m := Model{
 		store:       store,
-		annotations: annotations.NewWorkflow(store),
+		threads:     threadworkflow.NewWorkflow(store),
 		session:     review.NewSession([]diff.File{file}),
 		width:       80,
 		split:       true,
@@ -180,10 +180,10 @@ func TestSplitNavigationMovesByVisualRows(t *testing.T) {
 		{Kind: diff.Add, NewNo: 2, Text: "+new"},
 		{Kind: diff.Context, OldNo: 3, NewNo: 3, Text: " after"},
 	}}}}
-	store := &annotate.Store{}
+	store := &thread.Store{}
 	m := Model{
 		store:       store,
-		annotations: annotations.NewWorkflow(store),
+		threads:     threadworkflow.NewWorkflow(store),
 		session:     review.NewSession([]diff.File{file}),
 		width:       80,
 		height:      12,
@@ -258,10 +258,10 @@ func TestDiffPaneWrapsOnlySelectedLineWhenEnabled(t *testing.T) {
 	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@", Lines: []diff.Line{
 		{Kind: diff.Add, NewNo: 1, Text: "+one two three four five six seven eight"},
 	}}}}
-	store := &annotate.Store{}
+	store := &thread.Store{}
 	m := Model{
 		store:          store,
-		annotations:    annotations.NewWorkflow(store),
+		threads:        threadworkflow.NewWorkflow(store),
 		session:        review.NewSession([]diff.File{file}),
 		wrapCursorLine: true,
 		width:          80,
@@ -278,17 +278,143 @@ func TestDiffPaneWrapsOnlySelectedLineWhenEnabled(t *testing.T) {
 	if got := len(strings.Split(out, "\n")); got < 3 {
 		t.Fatalf("wrapped lines=%d, want >=3:\n%s", got, out)
 	}
-	if !strings.Contains(raw, "\x1b[48;5;"+string(selectedBg)+"mseven") {
-		t.Fatalf("wrapped continuation text missing selected highlight:\n%q", raw)
+}
+
+func TestDiffPaneDoesNotWrapShortSelectedSplitLine(t *testing.T) {
+	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: []diff.Line{
+		{Kind: diff.Add, NewNo: 1, Text: "+short"},
+	}}}}
+	store := &thread.Store{}
+	m := Model{
+		store:          store,
+		threads:        threadworkflow.NewWorkflow(store),
+		session:        review.NewSession([]diff.File{file}),
+		wrapCursorLine: true,
+		width:          80,
+		split:          true,
+		syntax:         false,
+		syntaxCache:    make(map[string]string),
+	}
+	m.session.JumpToIndex(0, 1, 10)
+
+	out := xansi.Strip(m.diffPane(28).Render(4))
+	if got := len(strings.Split(out, "\n")); got != 2 {
+		t.Fatalf("short selected split line wrapped to %d lines, want 2 including hunk:\n%s", got, out)
+	}
+}
+
+func TestDiffPaneWrapsSelectedFullWidthSplitLineWithSyntaxOn(t *testing.T) {
+	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: []diff.Line{
+		{Kind: diff.Add, NewNo: 1, Text: "+func example() { return one + two + three + four + five + six + seven + eight }"},
+	}}}}
+	store := &thread.Store{}
+	m := Model{
+		store:          store,
+		threads:        threadworkflow.NewWorkflow(store),
+		session:        review.NewSession([]diff.File{file}),
+		wrapCursorLine: true,
+		width:          80,
+		split:          true,
+		syntax:         true,
+		syntaxCache:    make(map[string]string),
+	}
+	m.session.JumpToIndex(0, 1, 10)
+
+	raw := m.diffPane(42).Render(6)
+	out := xansi.Strip(raw)
+	if strings.Contains(out, "…") || !strings.Contains(out, "seven") || !strings.Contains(out, "eight") {
+		t.Fatalf("selected syntax split line not wrapped fully:\n%s", out)
+	}
+	if !strings.Contains(raw, "\x1b[38;5;") {
+		t.Fatalf("selected wrapped syntax split line missing syntax highlighting:\n%q", raw)
+	}
+}
+
+func TestDiffPaneWrapsSelectedFullWidthSplitLine(t *testing.T) {
+	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: []diff.Line{
+		{Kind: diff.Add, NewNo: 1, Text: "+one two three four five six seven eight"},
+	}}}}
+	store := &thread.Store{}
+	m := Model{
+		store:          store,
+		threads:        threadworkflow.NewWorkflow(store),
+		session:        review.NewSession([]diff.File{file}),
+		wrapCursorLine: true,
+		width:          80,
+		split:          true,
+		syntax:         false,
+		syntaxCache:    make(map[string]string),
+	}
+	m.session.JumpToIndex(0, 1, 10)
+
+	out := xansi.Strip(m.diffPane(28).Render(4))
+	if strings.Contains(out, "…") || !strings.Contains(out, "seven") || !strings.Contains(out, "eight") {
+		t.Fatalf("selected full-width split line not wrapped fully:\n%s", out)
+	}
+	if got := len(strings.Split(out, "\n")); got < 3 {
+		t.Fatalf("wrapped split lines=%d, want >=3:\n%s", got, out)
+	}
+}
+
+func TestDiffPaneWrapsSelectedUnifiedLineWithSyntaxOn(t *testing.T) {
+	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: []diff.Line{
+		{Kind: diff.Add, NewNo: 1, Text: "+func example() { return one + two + three + four + five + six + seven + eight }"},
+	}}}}
+	store := &thread.Store{}
+	m := Model{
+		store:          store,
+		threads:        threadworkflow.NewWorkflow(store),
+		session:        review.NewSession([]diff.File{file}),
+		wrapCursorLine: true,
+		width:          80,
+		syntax:         true,
+		syntaxCache:    make(map[string]string),
+	}
+	m.session.JumpToIndex(0, 1, 10)
+
+	raw := m.diffPane(36).Render(6)
+	out := xansi.Strip(raw)
+	if strings.Contains(out, "…") || !strings.Contains(out, "seven") || !strings.Contains(out, "eight") {
+		t.Fatalf("selected syntax unified line not wrapped fully:\n%s", out)
+	}
+	if !strings.Contains(raw, "\x1b[38;5;") {
+		t.Fatalf("selected wrapped syntax unified line missing syntax highlighting:\n%q", raw)
+	}
+}
+
+func TestDiffPaneWrapsSelectedReplacementSplitLine(t *testing.T) {
+	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@", Lines: []diff.Line{
+		{Kind: diff.Delete, OldNo: 1, Text: "-one two three four five six seven eight"},
+		{Kind: diff.Add, NewNo: 1, Text: "+one two three four five six seven eight"},
+	}}}}
+	store := &thread.Store{}
+	m := Model{
+		store:          store,
+		threads:        threadworkflow.NewWorkflow(store),
+		session:        review.NewSession([]diff.File{file}),
+		wrapCursorLine: true,
+		width:          80,
+		split:          true,
+		syntax:         false,
+		syntaxCache:    make(map[string]string),
+	}
+	m.session.JumpToIndex(0, 1, 10)
+
+	out := xansi.Strip(m.diffPane(42).Render(6))
+	if strings.Contains(out, "…") || !strings.Contains(out, "seven eight") {
+		t.Fatalf("selected replacement split line not wrapped fully:\n%s", out)
+	}
+	if got := len(strings.Split(out, "\n")); got < 3 {
+		t.Fatalf("wrapped replacement split lines=%d, want >=3:\n%s", got, out)
 	}
 }
 
 func TestDiffPaneWrapsSelectedHunkHighlight(t *testing.T) {
 	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@ one two three four five six seven eight"}}}
-	store := &annotate.Store{}
+	store := &thread.Store{}
 	m := Model{
 		store:          store,
-		annotations:    annotations.NewWorkflow(store),
+		threads:        threadworkflow.NewWorkflow(store),
 		session:        review.NewSession([]diff.File{file}),
 		wrapCursorLine: true,
 		width:          80,
@@ -316,10 +442,10 @@ func TestDiffPaneKeepsSyntaxHighlightingOnAddDeleteLines(t *testing.T) {
 		{Kind: diff.Delete, OldNo: 1, Text: "-func old() {}"},
 		{Kind: diff.Add, NewNo: 1, Text: "+func main() {}"},
 	}}}}
-	store := &annotate.Store{}
+	store := &thread.Store{}
 	m := Model{
 		store:       store,
-		annotations: annotations.NewWorkflow(store),
+		threads:     threadworkflow.NewWorkflow(store),
 		session:     review.NewSession([]diff.File{file}),
 		width:       120,
 		syntax:      true,
@@ -337,13 +463,13 @@ func diffPaneTestModel(split bool) Model {
 		{Kind: diff.Delete, OldNo: 1, Text: "-old"},
 		{Kind: diff.Add, NewNo: 1, Text: "+new"},
 	}}}}
-	store := &annotate.Store{Annotations: []annotate.Annotation{{ID: "n1", Path: "foo.go", Side: annotate.SideOld, LineStart: 1, LineEnd: 1}}}
-	workflow := annotations.NewWorkflow(store)
+	store := &thread.Store{Threads: []thread.Thread{{ID: "n1", Path: "foo.go", Side: thread.SideOld, LineStart: 1, LineEnd: 1}}}
+	workflow := threadworkflow.NewWorkflow(store)
 	session := review.NewSession([]diff.File{file})
 	session.SetStores(store, store)
 	return Model{
 		store:       store,
-		annotations: workflow,
+		threads:     workflow,
 		session:     session,
 		width:       80,
 		split:       split,

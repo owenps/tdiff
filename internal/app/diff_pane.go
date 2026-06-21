@@ -10,11 +10,50 @@ import (
 	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
-	"github.com/owenps/tdiff/internal/annotate"
-	"github.com/owenps/tdiff/internal/annotations"
 	"github.com/owenps/tdiff/internal/diff"
 	"github.com/owenps/tdiff/internal/review"
+	"github.com/owenps/tdiff/internal/thread"
+	"github.com/owenps/tdiff/internal/threadtarget"
 )
+
+type threadMarkers map[thread.Side]map[int]string
+
+func newThreadMarkers(threads []thread.Thread) threadMarkers {
+	markers := threadMarkers{thread.SideOld: {}, thread.SideNew: {}}
+	for _, thread := range threads {
+		start, end := threadtarget.Range(thread)
+		if start <= 0 {
+			continue
+		}
+		if end < start {
+			end = start
+		}
+		for line := start; line <= end; line++ {
+			glyph := "│"
+			if start == end || line == start {
+				glyph = "●"
+			} else if line == end {
+				glyph = "╰"
+			}
+			if markers[thread.Side][line] == "" {
+				markers[thread.Side][line] = glyph
+			}
+		}
+	}
+	return markers
+}
+
+func (m threadMarkers) markerForLine(line diff.Line) string {
+	if side := m[thread.SideOld]; side != nil && line.OldNo > 0 {
+		if marker := side[line.OldNo]; marker != "" {
+			return marker
+		}
+	}
+	if side := m[thread.SideNew]; side != nil && line.NewNo > 0 {
+		return side[line.NewNo]
+	}
+	return ""
+}
 
 type diffPane struct {
 	path            string
@@ -29,23 +68,26 @@ type diffPane struct {
 	splitLayoutRows []splitRow
 	splitOffset     int
 	session         review.Session
-	workflow        annotations.Workflow
-	fileAnnotations []annotate.Annotation
+	markers         threadMarkers
 }
 
 func (m Model) renderDiff(height int) string {
+	return m.diffPane(m.diffWidth()).Render(height)
+}
+
+func (m Model) diffWidth() int {
 	width := max(40, m.width-sidebarWidth-2)
 	if m.hideSidebar {
 		width = max(40, m.width)
 	}
-	return m.diffPane(width).Render(height)
+	return width
 }
 
 func (m Model) diffPane(width int) diffPane {
 	path := m.currentPath()
-	var fileAnnotations []annotate.Annotation
+	var fileThreads []thread.Thread
 	if m.store != nil {
-		fileAnnotations = m.store.AnnotationsFor(path)
+		fileThreads = m.store.ThreadsFor(path)
 	}
 	var fullWidthHunks map[string]bool
 	var splitRows []splitRow
@@ -66,8 +108,7 @@ func (m Model) diffPane(width int) diffPane {
 		splitLayoutRows: splitRows,
 		splitOffset:     m.splitOffset,
 		session:         m.session,
-		workflow:        m.annotations,
-		fileAnnotations: fileAnnotations,
+		markers:         newThreadMarkers(fileThreads),
 	}
 }
 
@@ -190,13 +231,40 @@ func (m *Model) ensureSplitCursorVisible(height int) {
 		m.splitOffset = 0
 		return
 	}
+	rowHeight := m.splitRenderedRowHeight(nav.rows[rowIdx])
 	if rowIdx < m.splitOffset {
 		m.splitOffset = rowIdx
 	}
-	if rowIdx >= m.splitOffset+height {
-		m.splitOffset = rowIdx - height + 1
+	if rowIdx+rowHeight > m.splitOffset+height {
+		m.splitOffset = rowIdx + rowHeight - height
 	}
 	m.splitOffset = clamp(m.splitOffset, 0, max(0, len(nav.rows)-height))
+}
+
+func (m Model) splitRenderedRowHeight(row splitRow) int {
+	if !m.wrapCursorLine {
+		return 1
+	}
+	path := m.currentPath()
+	var fileThreads []thread.Thread
+	if m.store != nil {
+		fileThreads = m.store.ThreadsFor(path)
+	}
+	pane := diffPane{
+		path:            path,
+		width:           m.diffWidth(),
+		split:           true,
+		syntax:          m.syntax,
+		contextDim:      m.contextDim,
+		wrapCursorLine:  m.wrapCursorLine,
+		hideLineNumbers: m.hideLineNumbers,
+		syntaxCache:     m.syntaxCache,
+		fullWidthHunks:  m.splitFullWidthHunks(),
+		session:         m.session,
+		markers:         newThreadMarkers(fileThreads),
+	}
+	line := pane.formatSplitRow(row, pane.syntaxAllowed(m.session.CurrentLineCount()))
+	return strings.Count(line, "\n") + 1
 }
 
 func splitNavRowTargetLine(row splitRow, delta int) int {
@@ -227,6 +295,9 @@ func (p diffPane) Render(height int) string {
 
 	var rows []string
 	for offset, dl := range lines {
+		if len(rows) >= height {
+			break
+		}
 		i := start + offset
 		selected := i == lineIdx
 		inRange := p.inActiveRange(i)
@@ -239,7 +310,7 @@ func (p diffPane) Render(height int) string {
 				line = padRight(line, p.width)
 			}
 		}
-		rows = append(rows, line)
+		rows = appendRenderedRows(rows, line, height)
 	}
 	return style.Render(strings.Join(rows, "\n"))
 }
@@ -270,6 +341,9 @@ func (p diffPane) renderSplit(height int) string {
 	var out []string
 	lineIdx := p.session.LineIndex()
 	for _, row := range rows {
+		if len(out) >= height {
+			break
+		}
 		line := p.formatSplitRow(row, syntaxOK)
 		selected := row.oldIdx == lineIdx || row.newIdx == lineIdx
 		inRange := (row.oldIdx >= 0 && p.inActiveRange(row.oldIdx)) || (row.newIdx >= 0 && p.inActiveRange(row.newIdx))
@@ -280,9 +354,19 @@ func (p diffPane) renderSplit(height int) string {
 				line = padRight(line, p.width)
 			}
 		}
-		out = append(out, line)
+		out = appendRenderedRows(out, line, height)
 	}
 	return style.Render(strings.Join(out, "\n"))
+}
+
+func appendRenderedRows(rows []string, rendered string, maxRows int) []string {
+	for _, row := range strings.Split(rendered, "\n") {
+		if len(rows) >= maxRows {
+			break
+		}
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 func (p diffPane) intralinePairs(start, end int) map[int]string {
@@ -381,7 +465,7 @@ func (p diffPane) formatLine(dl displayLine, selected, inRange bool, rangeGlyph 
 	if dl.Line == nil {
 		text := railPrefix(rangeGlyph) + dl.Text
 		if selected {
-			if p.wrapCursorLine {
+			if p.wrapCursorLine && xansi.StringWidth(text) > p.width {
 				return wrapStyledPadded(text, p.width, selectedHunkStyle, selectedStyle)
 			}
 			return padRightStyled(selectedHunkStyle.Render(truncate(text, p.width)), p.width, selectedStyle)
@@ -393,12 +477,9 @@ func (p diffPane) formatLine(dl displayLine, selected, inRange bool, rangeGlyph 
 		return hunkStyle.Render(text)
 	}
 	l := *dl.Line
-	marker := " "
-	for _, n := range p.fileAnnotations {
-		if annotationMarker := p.workflow.MarkerFor(n, l); annotationMarker != "" {
-			marker = annotationMarker
-			break
-		}
+	marker := p.markers.markerForLine(l)
+	if marker == "" {
+		marker = " "
 	}
 	return p.formatUnifiedLine(l, marker, selected, inRange, rangeGlyph, syntaxOK, intralineAgainst)
 }
@@ -438,12 +519,15 @@ func (p diffPane) formatSplitRow(row splitRow, syntaxOK bool) string {
 	oldPrefix := ""
 	newPrefix := ""
 	if !p.hideLineNumbers {
-		oldNo, oldKind := splitLineNoAndKind(row.old.Line, annotate.SideOld)
-		newNo, newKind := splitLineNoAndKind(row.new.Line, annotate.SideNew)
+		oldNo, oldKind := splitLineNoAndKind(row.old.Line, thread.SideOld)
+		newNo, newKind := splitLineNoAndKind(row.new.Line, thread.SideNew)
 		oldPrefix = p.lineNoView(oldNo, oldKind, selected, inRange) + gutterView(" ", selected, inRange)
 		newPrefix = p.lineNoView(newNo, newKind, selected, inRange) + gutterView(" ", selected, inRange)
 	}
-	rest := oldPrefix + p.splitCellText(row.old.Line, annotate.SideOld, leftW, selected, inRange, syntaxOK, row.oldAgainst) + gutterView(" │ ", selected, inRange) + newPrefix + p.splitCellText(row.new.Line, annotate.SideNew, rightW, selected, inRange, syntaxOK, row.newAgainst)
+	if selected && p.wrapCursorLine && p.splitRowNeedsWrap(row, leftW, rightW, syntaxOK) {
+		return p.formatWrappedSplitRow(row, marker, rangeGlyph, inRange, oldPrefix, newPrefix, leftW, rightW, syntaxOK)
+	}
+	rest := oldPrefix + p.splitCellText(row.old.Line, thread.SideOld, leftW, selected, inRange, syntaxOK, row.oldAgainst) + gutterView(" │ ", selected, inRange) + newPrefix + p.splitCellText(row.new.Line, thread.SideNew, rightW, selected, inRange, syntaxOK, row.newAgainst)
 	line := prefix + rest
 	if selected {
 		line = railCell(railGlyph(marker, rangeGlyph), true, inRange) + selectedStyle.Render(" ") + rest
@@ -454,17 +538,18 @@ func (p diffPane) formatSplitRow(row splitRow, syntaxOK bool) string {
 
 func (p diffPane) formatFullWidthSplitRow(row splitRow, prefix, marker, rangeGlyph string, selected, inRange, syntaxOK bool) string {
 	line := row.new.Line
-	side := annotate.SideNew
+	side := thread.SideNew
 	if line == nil {
 		line = row.old.Line
-		side = annotate.SideOld
+		side = thread.SideOld
 	}
 	if line == nil {
 		return ""
 	}
 	rest := ""
+	kind := splitLineKind(line, side)
 	if !p.hideLineNumbers {
-		lineNo, kind := splitLineNoAndKind(line, side)
+		lineNo, _ := splitLineNoAndKind(line, side)
 		rest += p.lineNoView(lineNo, kind, selected, inRange) + gutterView(" ", selected, inRange)
 	}
 	fixed := 2
@@ -472,6 +557,14 @@ func (p diffPane) formatFullWidthSplitRow(row splitRow, prefix, marker, rangeGly
 		fixed += lineNoWidth + 1
 	}
 	cellW := max(1, p.width-fixed)
+	if selected && p.wrapCursorLine {
+		diffSign, body := diffMarkerBody(line.Text)
+		linePrefix := railCell(railGlyph(marker, rangeGlyph), true, inRange) + selectedStyle.Render(" ") + rest + diffSignView(diffSign, kind, true, inRange) + gutterView(" ", true, inRange)
+		bodyW := max(1, p.width-xansi.StringWidth(linePrefix))
+		if xansi.StringWidth(body) > bodyW {
+			return p.wrapSelectedBody(linePrefix, kind, body, true, inRange, syntaxOK, bodyW)
+		}
+	}
 	rest += p.splitCellText(line, side, cellW, selected, inRange, syntaxOK, "")
 	if selected {
 		line := railCell(railGlyph(marker, rangeGlyph), true, inRange) + selectedStyle.Render(" ") + rest
@@ -480,11 +573,96 @@ func (p diffPane) formatFullWidthSplitRow(row splitRow, prefix, marker, rangeGly
 	return truncate(prefix+rest, p.width)
 }
 
-func splitLineNoAndKind(line *diff.Line, side annotate.Side) (string, diff.Kind) {
+func (p diffPane) splitRowNeedsWrap(row splitRow, leftW, rightW int, syntaxOK bool) bool {
+	return p.splitLineNeedsWrap(row.old.Line, thread.SideOld, leftW, syntaxOK, row.oldAgainst) ||
+		p.splitLineNeedsWrap(row.new.Line, thread.SideNew, rightW, syntaxOK, row.newAgainst)
+}
+
+func (p diffPane) splitLineNeedsWrap(line *diff.Line, side thread.Side, width int, syntaxOK bool, intralineAgainst string) bool {
+	if line == nil || width <= 2 {
+		return false
+	}
+	_, body := diffMarkerBody(line.Text)
+	bodyW := max(1, width-2)
+	return xansi.StringWidth(body) > bodyW
+}
+
+func (p diffPane) formatWrappedSplitRow(row splitRow, marker, rangeGlyph string, inRange bool, oldPrefix, newPrefix string, leftW, rightW int, syntaxOK bool) string {
+	leftRows := p.splitCellTextRows(row.old.Line, thread.SideOld, leftW, true, inRange, syntaxOK, row.oldAgainst)
+	rightRows := p.splitCellTextRows(row.new.Line, thread.SideNew, rightW, true, inRange, syntaxOK, row.newAgainst)
+	rowCount := max(len(leftRows), len(rightRows))
+	if rowCount == 0 {
+		return ""
+	}
+	rows := make([]string, 0, rowCount)
+	for i := 0; i < rowCount; i++ {
+		linePrefix := selectedStyle.Render(strings.Repeat(" ", 2))
+		leftNo := selectedStyle.Render(strings.Repeat(" ", xansi.StringWidth(oldPrefix)))
+		newNo := selectedStyle.Render(strings.Repeat(" ", xansi.StringWidth(newPrefix)))
+		if i == 0 {
+			linePrefix = railCell(railGlyph(marker, rangeGlyph), true, inRange) + selectedStyle.Render(" ")
+			leftNo = oldPrefix
+			newNo = newPrefix
+		}
+		left := selectedStyle.Render(strings.Repeat(" ", leftW))
+		if i < len(leftRows) {
+			left = leftRows[i]
+		}
+		right := selectedStyle.Render(strings.Repeat(" ", rightW))
+		if i < len(rightRows) {
+			right = rightRows[i]
+		}
+		line := linePrefix + leftNo + left + gutterView(" │ ", true, inRange) + newNo + right
+		rows = append(rows, padRightStyled(truncate(line, p.width), p.width, selectedStyle))
+	}
+	return strings.Join(rows, "\n")
+}
+
+func (p diffPane) splitCellTextRows(line *diff.Line, side thread.Side, width int, selected, inRange, syntaxOK bool, intralineAgainst string) []string {
+	if width <= 0 {
+		return nil
+	}
+	if line == nil {
+		return []string{selectedStyle.Render(strings.Repeat(" ", width))}
+	}
+	kind := splitLineKind(line, side)
+	marker, body := diffMarkerBody(line.Text)
+	bodyW := max(1, width-2)
+	parts := wrappedParts(body, bodyW)
+	rows := make([]string, 0, len(parts))
+	for i, part := range parts {
+		sign := diffSignView(marker, kind, selected, inRange)
+		if i > 0 {
+			sign = selectedStyle.Render(" ")
+		}
+		bodyPart := p.syntaxBodyView(kind, part, selected, inRange, syntaxOK)
+		if intralineAgainst != "" && (kind == diff.Add || kind == diff.Delete) {
+			bodyPart = p.intralineTextView(kind, part, intralineAgainst, selected, inRange, syntaxOK)
+		}
+		text := sign + gutterView(" ", selected, inRange) + bodyPart
+		rows = append(rows, padRightStyled(text, width, splitCellPadStyle(selected, inRange)))
+	}
+	return rows
+}
+
+func splitLineKind(line *diff.Line, side thread.Side) diff.Kind {
+	if line == nil {
+		return diff.Context
+	}
+	if side == thread.SideOld && line.Kind == diff.Delete {
+		return diff.Delete
+	}
+	if side == thread.SideNew && line.Kind == diff.Add {
+		return diff.Add
+	}
+	return diff.Context
+}
+
+func splitLineNoAndKind(line *diff.Line, side thread.Side) (string, diff.Kind) {
 	if line == nil {
 		return lineNoText(0), diff.Context
 	}
-	if side == annotate.SideOld {
+	if side == thread.SideOld {
 		kind := diff.Context
 		if line.Kind == diff.Delete {
 			kind = diff.Delete
@@ -498,15 +676,15 @@ func splitLineNoAndKind(line *diff.Line, side annotate.Side) (string, diff.Kind)
 	return lineNoText(line.NewNo), kind
 }
 
-func (p diffPane) splitCellText(line *diff.Line, side annotate.Side, width int, selected, inRange, syntaxOK bool, intralineAgainst string) string {
+func (p diffPane) splitCellText(line *diff.Line, side thread.Side, width int, selected, inRange, syntaxOK bool, intralineAgainst string) string {
 	if line == nil || width <= 0 {
 		return gutterView(strings.Repeat(" ", max(0, width)), selected, inRange)
 	}
 	kind := diff.Context
-	if side == annotate.SideOld && line.Kind == diff.Delete {
+	if side == thread.SideOld && line.Kind == diff.Delete {
 		kind = diff.Delete
 	}
-	if side == annotate.SideNew && line.Kind == diff.Add {
+	if side == thread.SideNew && line.Kind == diff.Add {
 		kind = diff.Add
 	}
 	marker, body := diffMarkerBody(line.Text)
@@ -535,10 +713,8 @@ func (p diffPane) splitRowMarker(row splitRow) string {
 		if line == nil {
 			continue
 		}
-		for _, n := range p.fileAnnotations {
-			if marker := p.workflow.MarkerFor(n, *line); marker != "" {
-				return marker
-			}
+		if marker := p.markers.markerForLine(*line); marker != "" {
+			return marker
 		}
 	}
 	return " "
@@ -560,8 +736,9 @@ func (p diffPane) formatUnifiedLine(l diff.Line, marker string, selected, inRang
 	restPrefix += diffSignView(diffSign, l.Kind, selected, inRange) + gutterView(" ", selected, inRange)
 	if selected {
 		linePrefix := railCell(railGlyph(marker, rangeGlyph), true, inRange) + selectedStyle.Render(" ") + restPrefix
-		if p.wrapCursorLine {
-			return p.wrapSelectedLine(linePrefix, bodyView)
+		bodyW := max(1, p.width-xansi.StringWidth(linePrefix))
+		if p.wrapCursorLine && xansi.StringWidth(body) > bodyW {
+			return p.wrapSelectedBody(linePrefix, l.Kind, body, true, inRange, syntaxOK, bodyW)
 		}
 		return padRightStyled(truncate(linePrefix+bodyView, p.width), p.width, selectedStyle)
 	}
@@ -574,20 +751,26 @@ func (p diffPane) wrapSelectedLine(prefix, body string) string {
 		return wrapPadded(prefix+body, p.width, selectedStyle)
 	}
 	bodyW := max(1, p.width-prefixW)
-	parts := strings.Split(xansi.Wrap(body, bodyW, " /._"), "\n")
+	return p.wrapSelectedBody(prefix, diff.Context, body, true, false, false, bodyW)
+}
+
+func (p diffPane) wrapSelectedBody(prefix string, kind diff.Kind, body string, selected, inRange, syntaxOK bool, bodyW int) string {
+	prefixW := xansi.StringWidth(prefix)
+	parts := wrappedParts(body, bodyW)
 	rows := make([]string, 0, len(parts))
 	for i, part := range parts {
 		linePrefix := prefix
 		if i > 0 {
 			linePrefix = selectedStyle.Render(strings.Repeat(" ", prefixW))
 		}
-		rows = append(rows, padRightStyled(linePrefix+withANSIBackground(part, selectedBg), p.width, selectedStyle))
+		bodyPart := p.syntaxBodyView(kind, part, selected, inRange, syntaxOK)
+		rows = append(rows, padRightStyled(linePrefix+bodyPart, p.width, selectedStyle))
 	}
 	return strings.Join(rows, "\n")
 }
 
 func wrapPadded(s string, width int, style lipgloss.Style) string {
-	parts := strings.Split(xansi.Wrap(s, width, " /._"), "\n")
+	parts := wrappedParts(s, width)
 	rows := make([]string, 0, len(parts))
 	for _, part := range parts {
 		rows = append(rows, padRightStyled(part, width, style))
@@ -595,8 +778,16 @@ func wrapPadded(s string, width int, style lipgloss.Style) string {
 	return strings.Join(rows, "\n")
 }
 
+func wrappedParts(s string, width int) []string {
+	wrapped := strings.TrimSuffix(xansi.Wrap(s, width, " /._"), "\n")
+	if wrapped == "" {
+		return []string{""}
+	}
+	return strings.Split(wrapped, "\n")
+}
+
 func wrapStyledPadded(s string, width int, textStyle, padStyle lipgloss.Style) string {
-	parts := strings.Split(xansi.Wrap(s, width, " /._"), "\n")
+	parts := wrappedParts(s, width)
 	rows := make([]string, 0, len(parts))
 	for _, part := range parts {
 		rows = append(rows, padRightStyled(withANSIBackground(textStyle.Render(part), selectedBg), width, padStyle))
@@ -689,11 +880,11 @@ func changedSpan(a, b string) (int, int) {
 	return start, endA
 }
 
-func (p diffPane) splitTextView(kind diff.Kind, side annotate.Side, s string, selected, inRange, syntaxOK bool) string {
-	if kind == diff.Delete && side == annotate.SideOld {
+func (p diffPane) splitTextView(kind diff.Kind, side thread.Side, s string, selected, inRange, syntaxOK bool) string {
+	if kind == diff.Delete && side == thread.SideOld {
 		return p.syntaxBodyView(kind, s, selected, inRange, syntaxOK)
 	}
-	if kind == diff.Add && side == annotate.SideNew {
+	if kind == diff.Add && side == thread.SideNew {
 		return p.syntaxBodyView(kind, s, selected, inRange, syntaxOK)
 	}
 	if selected {
@@ -811,11 +1002,11 @@ func (p diffPane) rangeGlyph(idx int) string {
 	return p.session.RangeGlyph(idx)
 }
 
-func railGlyph(annotationMarker, rangeGlyph string) string {
+func railGlyph(threadMarker, rangeGlyph string) string {
 	if strings.TrimSpace(rangeGlyph) != "" {
 		return rangeGlyph
 	}
-	return annotationMarker
+	return threadMarker
 }
 
 func railCell(glyph string, selected, inRange bool) string {
@@ -832,12 +1023,12 @@ func railCell(glyph string, selected, inRange bool) string {
 		return " "
 	}
 	if selected {
-		return selectedAnnotationStyle.Render(glyph)
+		return selectedThreadStyle.Render(glyph)
 	}
 	if inRange {
-		return rangeAnnotationStyle.Render(glyph)
+		return rangeThreadStyle.Render(glyph)
 	}
-	return annotationStyle.Render(glyph)
+	return threadStyle.Render(glyph)
 }
 
 func railPrefix(glyph string) string {

@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/owenps/tdiff/internal/annotate"
 	"github.com/owenps/tdiff/internal/diff"
 	"github.com/owenps/tdiff/internal/review"
+	"github.com/owenps/tdiff/internal/thread"
 )
 
 func BenchmarkRenderDiffLargeNoSyntax(b *testing.B) {
@@ -96,6 +96,18 @@ func BenchmarkSplitReplacementUniqueMoveAndRenderSyntaxActive(b *testing.B) {
 	}
 }
 
+func BenchmarkReviewViewSplitLineNavCachedSidebar(b *testing.B) {
+	m := benchReplacementUniqueModel(1_000)
+	m.split = true
+	m.syntax = true
+	_ = m.View()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		m.moveLine(1)
+		_ = m.View()
+	}
+}
+
 func benchModel(lines int) Model {
 	diffLines := make([]diff.Line, lines)
 	for i := range diffLines {
@@ -103,10 +115,12 @@ func benchModel(lines int) Model {
 	}
 	file := diff.File{NewPath: "big.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: diffLines}}}
 	return Model{
-		store:          &annotate.Store{},
+		store:          &thread.Store{},
 		session:        review.NewSession([]diff.File{file}),
 		width:          120,
 		height:         40,
+		viewCache:      make(map[string]string),
+		statsCache:     make(map[string]diffStats),
 		syntaxCache:    make(map[string]string),
 		splitHunkCache: make(map[string]map[string]bool),
 		splitNavCache:  make(map[string]splitNav),
@@ -123,10 +137,12 @@ func benchReplacementModel(pairs int) Model {
 	}
 	file := diff.File{NewPath: "big.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@", Lines: diffLines}}}
 	return Model{
-		store:          &annotate.Store{},
+		store:          &thread.Store{},
 		session:        review.NewSession([]diff.File{file}),
 		width:          120,
 		height:         40,
+		viewCache:      make(map[string]string),
+		statsCache:     make(map[string]diffStats),
 		syntaxCache:    make(map[string]string),
 		splitHunkCache: make(map[string]map[string]bool),
 		splitNavCache:  make(map[string]splitNav),
@@ -143,10 +159,12 @@ func benchReplacementUniqueModel(pairs int) Model {
 	}
 	file := diff.File{NewPath: "big.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@", Lines: diffLines}}}
 	return Model{
-		store:          &annotate.Store{},
+		store:          &thread.Store{},
 		session:        review.NewSession([]diff.File{file}),
 		width:          120,
 		height:         40,
+		viewCache:      make(map[string]string),
+		statsCache:     make(map[string]diffStats),
 		syntaxCache:    make(map[string]string),
 		splitHunkCache: make(map[string]map[string]bool),
 		splitNavCache:  make(map[string]splitNav),

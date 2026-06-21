@@ -2,13 +2,14 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/owenps/tdiff/internal/annotate"
-	"github.com/owenps/tdiff/internal/annotations"
+	"github.com/owenps/tdiff/internal/thread"
+	"github.com/owenps/tdiff/internal/threadworkflow"
 )
 
 func (m Model) handleAsyncMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
@@ -61,13 +62,14 @@ func (m *Model) handlePRAttachLoaded(msg prAttachLoadedMsg) {
 		m.status = fmt.Sprintf("attached PR #%d · sync failed", msg.pr.Number)
 		return
 	}
-	count, err := m.store.SyncGitHubAnnotations(msg.pr, msg.threads)
+	count, err := m.store.SyncGitHubThreads(msg.pr, msg.threads)
 	if err != nil {
 		m.status = err.Error()
 		return
 	}
 	m.session.RefreshFilters()
-	m.status = fmt.Sprintf("attached PR #%d · %d annotations", msg.pr.Number, count)
+	m.invalidateViewCache()
+	m.status = fmt.Sprintf("attached PR #%d · %d threads", msg.pr.Number, count)
 }
 
 func (m *Model) handleRefreshLoaded(msg refreshLoadedMsg) {
@@ -78,6 +80,8 @@ func (m *Model) handleRefreshLoaded(msg refreshLoadedMsg) {
 	}
 	m.compareTarget = msg.compareTarget
 	m.session.SetSnapshot(msg.snap.Files, msg.snap.Hash)
+	m.viewCache = make(map[string]string)
+	m.statsCache = make(map[string]diffStats)
 	m.syntaxCache = make(map[string]string)
 	m.splitHunkCache = make(map[string]map[string]bool)
 	m.splitNavCache = make(map[string]splitNav)
@@ -98,13 +102,14 @@ func (m *Model) handleRefreshLoaded(msg refreshLoadedMsg) {
 		m.status = "diff refreshed · github sync failed"
 		return
 	}
-	count, err := m.store.SyncGitHubAnnotations(*msg.pr, msg.threads)
+	count, err := m.store.SyncGitHubThreads(*msg.pr, msg.threads)
 	if err != nil {
 		m.status = err.Error()
 		return
 	}
 	m.session.RefreshFilters()
-	m.status = fmt.Sprintf("PR #%d synced · %d annotations", msg.pr.Number, count)
+	m.invalidateViewCache()
+	m.status = fmt.Sprintf("PR #%d synced · %d threads", msg.pr.Number, count)
 }
 
 func (m Model) updateComposer(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -113,10 +118,11 @@ func (m Model) updateComposer(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "alt+enter":
-			if err := m.saveAnnotation(); err != nil {
+			if err := m.saveThread(); err != nil {
 				m.status = err.Error()
 			} else {
-				m.status = "annotation saved"
+				m.status = "thread saved"
+				m.invalidateViewCache()
 				m.closeComposer()
 			}
 			return m, m.statusToastCmd(previousStatus)
@@ -134,8 +140,9 @@ func (m *Model) closeComposer() {
 	m.composing = false
 	m.composerBaseView = ""
 	m.session.CancelRange()
-	m.editingAnnotationID = ""
-	m.pendingTarget = annotations.Target{}
+	m.editingThreadID = ""
+	m.replyingThreadID = ""
+	m.pendingTarget = threadworkflow.Target{}
 	m.editor.Blur()
 	m.editor.Reset()
 }
@@ -218,20 +225,23 @@ func (m Model) updateKey(msg tea.KeyMsg, previousStatus string) (tea.Model, tea.
 	case "u":
 		m.pendingKey = ""
 		m.status = fmt.Sprintf("hide viewed: %t", m.session.ToggleHideViewed())
+		m.invalidateViewCache()
 	case "m":
 		m.pendingKey = ""
-		m.status = fmt.Sprintf("annotations only: %t", m.session.ToggleAnnotationsOnly())
+		m.status = fmt.Sprintf("threads only: %t", m.session.ToggleThreadsOnly())
+		m.invalidateViewCache()
 	case "b":
 		m.pendingKey = ""
 		m.hideSidebar = !m.hideSidebar
 		m.status = fmt.Sprintf("sidebar: %t", !m.hideSidebar)
 	case "y":
-		m.copySelectedAnnotation()
+		m.copySelectedThread()
 	case "Y":
-		m.copyAllAnnotations()
+		m.copyAllThreads()
 	case "w":
 		m.pendingKey = ""
 		m.wrapCursorLine = !m.wrapCursorLine
+		m.ensureSplitCursorVisible(m.bodyHeight())
 		m.status = fmt.Sprintf("wrap cursor line: %t", m.wrapCursorLine)
 	case "L":
 		m.pendingKey = ""
@@ -241,39 +251,48 @@ func (m Model) updateKey(msg tea.KeyMsg, previousStatus string) (tea.Model, tea.
 		m.toggleWhitespace()
 	case "R":
 		return m.refreshKey(previousStatus)
+	case "A":
+		m.approveReview()
 	case "v":
 		m.toggleViewedStatus()
 	case "r":
 		m.toggleRangeStatus()
-	case "a":
-		return m.annotationKey(previousStatus)
+	case "a", "t":
+		return m.threadKey(previousStatus)
+	case "enter":
+		return m.replyThreadKey(previousStatus)
 	case "e":
-		return m.editAnnotationKey(previousStatus)
+		return m.editThreadKey(previousStatus)
 	case "d":
-		m.deleteAnnotationKey()
+		m.deleteThreadKey()
 	}
 	return m, m.statusToastCmd(previousStatus)
 }
 
-func (m *Model) copySelectedAnnotation() {
+func (m *Model) copySelectedThread() {
 	m.pendingKey = ""
-	if annotation, ok := m.selectedAnnotation(); ok {
-		if err := clipboard.WriteAll(annotationMarkdown(annotation)); err != nil {
+	if selected, ok := m.selectedThread(); ok {
+		if err := clipboard.WriteAll(threadText(selected)); err != nil {
 			m.status = err.Error()
 		} else {
-			m.status = "annotation copied"
+			m.status = "thread copied"
 		}
 	} else {
-		m.status = "no annotation on selected line"
+		m.status = "no thread on selected line"
 	}
 }
 
-func (m *Model) copyAllAnnotations() {
+func (m *Model) copyAllThreads() {
 	m.pendingKey = ""
-	if err := clipboard.WriteAll(m.store.ExportMarkdown()); err != nil {
+	b, err := json.MarshalIndent(m.store.Threads, "", "  ")
+	if err != nil {
+		m.status = err.Error()
+		return
+	}
+	if err := clipboard.WriteAll(string(append(b, '\n'))); err != nil {
 		m.status = err.Error()
 	} else {
-		m.status = "annotations copied"
+		m.status = "threads copied"
 	}
 }
 
@@ -308,6 +327,7 @@ func (m *Model) toggleViewedStatus() {
 	if result.Path == "" {
 		return
 	}
+	m.invalidateViewCache()
 	if !result.Viewed {
 		m.status = "unmarked viewed"
 	} else if m.session.HideViewed() || result.Advanced {
@@ -315,6 +335,27 @@ func (m *Model) toggleViewedStatus() {
 	} else {
 		m.status = "marked viewed; no next unviewed file"
 	}
+}
+
+func (m *Model) approveReview() {
+	m.pendingKey = ""
+	if m.store.ReviewStatus(m.session.DiffHash()) == "approved" {
+		if err := m.store.Unapprove(m.session.DiffHash()); err != nil {
+			m.status = err.Error()
+			return
+		}
+		m.status = "review approval removed"
+		return
+	}
+	if open := len(m.session.ThreadPositions()); open > 0 {
+		m.status = fmt.Sprintf("cannot approve: %d open threads", open)
+		return
+	}
+	if err := m.store.Approve(m.session.DiffHash()); err != nil {
+		m.status = err.Error()
+		return
+	}
+	m.status = "review approved"
 }
 
 func (m *Model) toggleRangeStatus() {
@@ -329,15 +370,15 @@ func (m *Model) toggleRangeStatus() {
 	}
 }
 
-func (m Model) annotationKey(previousStatus string) (tea.Model, tea.Cmd) {
+func (m Model) threadKey(previousStatus string) (tea.Model, tea.Cmd) {
 	if m.pendingKey == "[" {
 		m.pendingKey = ""
-		m.prevAnnotation()
+		m.prevThread()
 		return m, m.statusToastCmd(previousStatus)
 	}
 	if m.pendingKey == "]" {
 		m.pendingKey = ""
-		m.nextAnnotation()
+		m.nextThread()
 		return m, m.statusToastCmd(previousStatus)
 	}
 	m.pendingKey = ""
@@ -347,54 +388,69 @@ func (m Model) annotationKey(previousStatus string) (tea.Model, tea.Cmd) {
 			m.status = err.Error()
 			return m, m.statusToastCmd(previousStatus)
 		}
-		m.startNewAnnotation(target)
+		m.startNewThread(target)
 		return m, textarea.Blink
 	}
-	if annotation, ok := m.selectedAnnotation(); ok {
-		if annotation.Source == annotate.SourceGitHub {
-			m.status = "github annotation readonly"
+	if selected, ok := m.selectedThread(); ok {
+		if selected.Source == thread.SourceGitHub {
+			m.status = "github thread readonly"
 			return m, m.statusToastCmd(previousStatus)
 		}
-		m.startEditAnnotation(annotation)
+		m.startEditThread(selected)
 		return m, textarea.Blink
 	}
 	if target, err := m.singleLineTarget(); err == nil {
-		m.startNewAnnotation(target)
+		m.startNewThread(target)
 		return m, textarea.Blink
 	}
 	return m, m.statusToastCmd(previousStatus)
 }
 
-func (m Model) editAnnotationKey(previousStatus string) (tea.Model, tea.Cmd) {
+func (m Model) replyThreadKey(previousStatus string) (tea.Model, tea.Cmd) {
 	m.pendingKey = ""
-	if annotation, ok := m.selectedAnnotation(); ok {
-		if annotation.Source == annotate.SourceGitHub {
-			m.status = "github annotation readonly"
+	if selected, ok := m.selectedThread(); ok {
+		if selected.Source == thread.SourceGitHub {
+			m.status = "github thread readonly"
 			return m, m.statusToastCmd(previousStatus)
 		}
-		m.startEditAnnotation(annotation)
+		m.startReplyThread(selected)
 		return m, textarea.Blink
 	}
-	m.status = "no annotation on selected line"
+	m.status = "no thread on selected line"
 	return m, m.statusToastCmd(previousStatus)
 }
 
-func (m *Model) deleteAnnotationKey() {
+func (m Model) editThreadKey(previousStatus string) (tea.Model, tea.Cmd) {
 	m.pendingKey = ""
-	if annotation, ok := m.selectedAnnotation(); ok {
-		if annotation.Source == annotate.SourceGitHub {
-			m.status = "github annotation readonly"
+	if selected, ok := m.selectedThread(); ok {
+		if selected.Source == thread.SourceGitHub {
+			m.status = "github thread readonly"
+			return m, m.statusToastCmd(previousStatus)
+		}
+		m.startEditThread(selected)
+		return m, textarea.Blink
+	}
+	m.status = "no thread on selected line"
+	return m, m.statusToastCmd(previousStatus)
+}
+
+func (m *Model) deleteThreadKey() {
+	m.pendingKey = ""
+	if selected, ok := m.selectedThread(); ok {
+		if selected.Source == thread.SourceGitHub {
+			m.status = "github thread readonly"
 			return
 		}
-		if err := m.annotations.Delete(annotation.ID); err != nil {
+		if err := m.threads.Delete(selected.ID); err != nil {
 			m.status = err.Error()
 		} else {
-			m.status = "annotation deleted"
-			if m.session.AnnotationsOnly() {
+			m.status = "thread deleted"
+			m.invalidateViewCache()
+			if m.session.ThreadsOnly() {
 				m.session.RefreshFilters()
 			}
 		}
 		return
 	}
-	m.status = "no annotation on selected line"
+	m.status = "no thread on selected line"
 }

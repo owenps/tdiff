@@ -11,13 +11,13 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	xansi "github.com/charmbracelet/x/ansi"
-	"github.com/owenps/tdiff/internal/annotate"
-	"github.com/owenps/tdiff/internal/annotations"
 	"github.com/owenps/tdiff/internal/diff"
 	"github.com/owenps/tdiff/internal/git"
 	gh "github.com/owenps/tdiff/internal/github"
 	"github.com/owenps/tdiff/internal/review"
 	"github.com/owenps/tdiff/internal/snapshot"
+	"github.com/owenps/tdiff/internal/thread"
+	"github.com/owenps/tdiff/internal/threadworkflow"
 )
 
 type Config struct {
@@ -31,39 +31,42 @@ type Model struct {
 	repo          git.Repo
 	cfg           Config
 	compareTarget string
-	store         *annotate.Store
-	annotations   annotations.Workflow
+	store         *thread.Store
+	threads       threadworkflow.Workflow
 
 	session review.Session
 
 	width  int
 	height int
 
-	loadingFrame        int
-	pendingKey          string
-	jumpPrompt          bool
-	jumpInput           string
-	split               bool
-	syntax              bool
-	contextDim          bool
-	wrapCursorLine      bool
-	hideLineNumbers     bool
-	showHelp            bool
-	hideSidebar         bool
-	composing           bool
-	editingAnnotationID string
-	pendingTarget       annotations.Target
-	editor              textarea.Model
-	prPicker            prPicker
-	prAttaching         bool
-	refreshing          bool
-	status              string
-	statusID            int
-	composerBaseView    string
-	syntaxCache         map[string]string
-	splitHunkCache      map[string]map[string]bool
-	splitNavCache       map[string]splitNav
-	splitOffset         int
+	loadingFrame     int
+	pendingKey       string
+	jumpPrompt       bool
+	jumpInput        string
+	split            bool
+	syntax           bool
+	contextDim       bool
+	wrapCursorLine   bool
+	hideLineNumbers  bool
+	showHelp         bool
+	hideSidebar      bool
+	composing        bool
+	editingThreadID  string
+	replyingThreadID string
+	pendingTarget    threadworkflow.Target
+	editor           textarea.Model
+	prPicker         prPicker
+	prAttaching      bool
+	refreshing       bool
+	status           string
+	statusID         int
+	composerBaseView string
+	viewCache        map[string]string
+	statsCache       map[string]diffStats
+	syntaxCache      map[string]string
+	splitHunkCache   map[string]map[string]bool
+	splitNavCache    map[string]splitNav
+	splitOffset      int
 }
 
 func New(ctx context.Context, cfg Config) (Model, error) {
@@ -71,14 +74,14 @@ func New(ctx context.Context, cfg Config) (Model, error) {
 	if err != nil {
 		return Model{}, err
 	}
-	store, err := annotate.Open(repo.Root)
+	store, err := thread.Open(repo.Root)
 	if err != nil {
 		return Model{}, err
 	}
-	m := Model{repo: repo, cfg: cfg, store: store, annotations: annotations.NewWorkflow(store), session: review.NewSession(nil), syntax: true, contextDim: true, syntaxCache: make(map[string]string), splitHunkCache: make(map[string]map[string]bool), splitNavCache: make(map[string]splitNav)}
+	m := Model{repo: repo, cfg: cfg, store: store, threads: threadworkflow.NewWorkflow(store), session: review.NewSession(nil), syntax: true, contextDim: true, viewCache: make(map[string]string), statsCache: make(map[string]diffStats), syntaxCache: make(map[string]string), splitHunkCache: make(map[string]map[string]bool), splitNavCache: make(map[string]splitNav)}
 	m.session.SetStores(store, store)
 	m.editor = textarea.New()
-	m.editor.Placeholder = "annotation"
+	m.editor.Placeholder = "thread"
 	m.editor.CharLimit = 4000
 	m.editor.SetHeight(5)
 	m.editor.ShowLineNumbers = false
@@ -167,7 +170,7 @@ func (m Model) ready() bool {
 
 func (m Model) loadingView() string {
 	frame := loadingSpinnerFrames[m.loadingFrame%len(loadingSpinnerFrames)]
-	return annotationStyle.Render(frame) + " " + dimStyle.Render("opening tdiff…")
+	return threadStyle.Render(frame) + " " + dimStyle.Render("opening tdiff…")
 }
 
 func (m Model) reviewView() string {
@@ -206,6 +209,8 @@ func (m *Model) reload(ctx context.Context) error {
 	}
 	m.compareTarget = compareTarget
 	m.session.SetSnapshot(s.Files, s.Hash)
+	m.viewCache = make(map[string]string)
+	m.statsCache = make(map[string]diffStats)
 	m.syntaxCache = make(map[string]string)
 	m.splitHunkCache = make(map[string]map[string]bool)
 	m.splitNavCache = make(map[string]splitNav)
@@ -304,35 +309,47 @@ func (m Model) selectedLine() displayLine {
 	return m.session.SelectedLine()
 }
 
-func (m Model) selectedAnnotation() (annotate.Annotation, bool) {
-	return m.session.SelectedAnnotation()
+func (m Model) selectedThread() (thread.Thread, bool) {
+	return m.session.SelectedThread()
 }
 
-func (m *Model) startEditAnnotation(annotation annotate.Annotation) {
+func (m *Model) startEditThread(t thread.Thread) {
 	m.composerBaseView = m.reviewView()
-	m.editingAnnotationID = annotation.ID
-	m.pendingTarget = annotations.Target{}
+	m.editingThreadID = t.ID
+	m.replyingThreadID = ""
+	m.pendingTarget = threadworkflow.Target{}
 	m.editor.Reset()
-	m.editor.SetValue(annotation.Body)
+	m.editor.SetValue(thread.Body(t))
 	m.composing = true
 	m.editor.Focus()
 }
 
-func (m *Model) startNewAnnotation(target annotations.Target) {
+func (m *Model) startReplyThread(t thread.Thread) {
 	m.composerBaseView = m.reviewView()
-	m.editingAnnotationID = ""
+	m.editingThreadID = ""
+	m.replyingThreadID = t.ID
+	m.pendingTarget = threadworkflow.Target{}
+	m.editor.Reset()
+	m.composing = true
+	m.editor.Focus()
+}
+
+func (m *Model) startNewThread(target threadworkflow.Target) {
+	m.composerBaseView = m.reviewView()
+	m.editingThreadID = ""
+	m.replyingThreadID = ""
 	m.pendingTarget = target
 	m.editor.Reset()
 	m.composing = true
 	m.editor.Focus()
 }
 
-func (m Model) singleLineTarget() (annotations.Target, error) {
-	return m.annotations.TargetForDisplayLine(m.selectedLine())
+func (m Model) singleLineTarget() (threadworkflow.Target, error) {
+	return m.threads.TargetForDisplayLine(m.selectedLine())
 }
 
-func (m Model) rangeTarget() (annotations.Target, error) {
-	return m.annotations.TargetForDisplayRange(m.session.RangeLines())
+func (m Model) rangeTarget() (threadworkflow.Target, error) {
+	return m.threads.TargetForDisplayRange(m.session.RangeLines())
 }
 
 func (m Model) currentPath() string {
@@ -348,7 +365,7 @@ func (s diffStats) String() string {
 	return fmt.Sprintf("+%d -%d", s.Added, s.Deleted)
 }
 
-func fileStats(f diff.File) diffStats {
+func computeFileStats(f diff.File) diffStats {
 	var s diffStats
 	for _, h := range f.Hunks {
 		for _, l := range h.Lines {
@@ -363,10 +380,24 @@ func fileStats(f diff.File) diffStats {
 	return s
 }
 
+func (m Model) fileStats(f diff.File) diffStats {
+	path := f.Path()
+	if m.statsCache != nil {
+		if stats, ok := m.statsCache[path]; ok {
+			return stats
+		}
+	}
+	stats := computeFileStats(f)
+	if m.statsCache != nil {
+		m.statsCache[path] = stats
+	}
+	return stats
+}
+
 func (m Model) totalStats() diffStats {
 	var total diffStats
 	for _, f := range m.session.Files() {
-		s := fileStats(f)
+		s := m.fileStats(f)
 		total.Added += s.Added
 		total.Deleted += s.Deleted
 	}
@@ -405,40 +436,40 @@ func sidebarStat(prefix string, count int) string {
 	return fmt.Sprintf("%s%d", prefix, count)
 }
 
-func (m Model) annotationCount(path string) int {
-	return m.session.AnnotationCount(path)
+func (m Model) threadCount(path string) int {
+	return m.session.ThreadCount(path)
 }
 
-func (m Model) totalAnnotationCount() int {
+func (m Model) totalThreadCount() int {
 	total := 0
 	for _, f := range m.session.Files() {
-		total += m.annotationCount(f.Path())
+		total += m.threadCount(f.Path())
 	}
 	return total
 }
 
-func (m Model) annotationsView(count int) string {
+func (m Model) threadsView(count int) string {
 	if count == 0 {
 		return ""
 	}
-	return annotationStyle.Render(fmt.Sprintf("●%d", count))
+	return threadStyle.Render(fmt.Sprintf("●%d", count))
 }
 
-func sidebarHeader(stats, annotations string) string {
+func sidebarHeader(stats, threads string) string {
 	parts := []string{titleStyle.Render("tdiff")}
 	if stats != "" {
 		parts = append(parts, stats)
 	}
-	if annotations != "" {
-		parts = append(parts, annotations)
+	if threads != "" {
+		parts = append(parts, threads)
 	}
 	return strings.Join(parts, " ")
 }
 
-func selectedSidebarLine(prefix, viewed string, nameW int, path, added, deleted string, annotationCount, annotationW int) string {
+func selectedSidebarLine(prefix, viewed string, nameW int, path, added, deleted string, threadCount, threadW int) string {
 	rail := selectedStyle.Render(prefix)
 	if strings.Contains(prefix, "▌") {
-		rail = selectedAnnotationStyle.Render("▌") + selectedStyle.Render(" ")
+		rail = selectedThreadStyle.Render("▌") + selectedStyle.Render(" ")
 	}
 	line := rail +
 		selectedStyle.Render(viewed+" ") +
@@ -448,39 +479,39 @@ func selectedSidebarLine(prefix, viewed string, nameW int, path, added, deleted 
 		selectedStyle.Render(" ") +
 		selectedDeleteStyle.Render(deleted) +
 		selectedStyle.Render(" ") +
-		sidebarAnnotationView(annotationCount, annotationW, true)
+		sidebarThreadView(threadCount, threadW, true)
 	return padRightStyled(line, sidebarWidth, selectedStyle)
 }
 
-func sidebarAnnotationView(count, width int, selected bool) string {
-	annotation := strings.Repeat(" ", width)
+func sidebarThreadView(count, width int, selected bool) string {
+	thread := strings.Repeat(" ", width)
 	if count > 0 {
-		annotation = fmt.Sprintf("%*s", width, fmt.Sprintf("●%d", count))
+		thread = fmt.Sprintf("%*s", width, fmt.Sprintf("●%d", count))
 	}
 	if count == 0 {
 		if selected {
-			return selectedStyle.Render(annotation)
+			return selectedStyle.Render(thread)
 		}
-		return dimStyle.Render(annotation)
+		return dimStyle.Render(thread)
 	}
 	if selected {
-		return selectedAnnotationStyle.Render(annotation)
+		return selectedThreadStyle.Render(thread)
 	}
-	return annotationStyle.Render(annotation)
+	return threadStyle.Render(thread)
 }
 
-func sidebarColumnWidths(files []diff.File, annotationCount func(string) int) (int, int, int, int) {
-	addW, delW, annotationW := 0, 0, 2
+func sidebarColumnWidths(files []diff.File, threadCount func(string) int, statsFor func(diff.File) diffStats) (int, int, int, int) {
+	addW, delW, threadW := 0, 0, 2
 	for _, f := range files {
-		stats := fileStats(f)
+		stats := statsFor(f)
 		addW = max(addW, xansi.StringWidth(sidebarStat("+", stats.Added)))
 		delW = max(delW, xansi.StringWidth(sidebarStat("-", stats.Deleted)))
-		if annotations := annotationCount(f.Path()); annotations > 0 {
-			annotationW = max(annotationW, xansi.StringWidth(fmt.Sprintf("●%d", annotations)))
+		if threads := threadCount(f.Path()); threads > 0 {
+			threadW = max(threadW, xansi.StringWidth(fmt.Sprintf("●%d", threads)))
 		}
 	}
-	nameW := max(8, sidebarWidth-7-addW-delW-annotationW)
-	return nameW, addW, delW, annotationW
+	nameW := max(8, sidebarWidth-7-addW-delW-threadW)
+	return nameW, addW, delW, threadW
 }
 
 func sidebarPath(path string, width int, selected, viewed bool) string {
@@ -618,21 +649,21 @@ func (m *Model) prevHunk() {
 	m.ensureSplitCursorVisible(m.bodyHeight())
 }
 
-func (m *Model) nextAnnotation() {
-	m.jumpAnnotation(1)
+func (m *Model) nextThread() {
+	m.jumpThread(1)
 }
 
-func (m *Model) prevAnnotation() {
-	m.jumpAnnotation(-1)
+func (m *Model) prevThread() {
+	m.jumpThread(-1)
 }
 
-func (m *Model) jumpAnnotation(delta int) {
-	idx, total, ok := m.session.JumpAnnotation(delta, m.bodyHeight())
+func (m *Model) jumpThread(delta int) {
+	idx, total, ok := m.session.JumpThread(delta, m.bodyHeight())
 	if !ok {
-		m.status = "no annotations"
+		m.status = "no threads"
 		return
 	}
-	m.status = fmt.Sprintf("annotation %d/%d", idx, total)
+	m.status = fmt.Sprintf("thread %d/%d", idx, total)
 }
 
 func (m *Model) jumpToFileLine(line int) bool {
@@ -657,15 +688,33 @@ func (m Model) footerHeight() int {
 	return 1
 }
 
+func (m *Model) invalidateViewCache() {
+	m.viewCache = make(map[string]string)
+}
+
+func (m Model) sidebarCacheKey(height int) string {
+	selectedID := ""
+	if selected, ok := m.selectedThread(); ok {
+		selectedID = selected.ID
+	}
+	return fmt.Sprintf("sidebar:%d:%d:%d:%s:%d:%t:%t", height, m.session.FileIndex(), len(m.session.Files()), selectedID, m.totalThreadCount(), m.session.HideViewed(), m.session.ThreadsOnly())
+}
+
 func (m Model) renderSidebar(height int) string {
+	cacheKey := m.sidebarCacheKey(height)
+	if m.viewCache != nil {
+		if cached, ok := m.viewCache[cacheKey]; ok {
+			return cached
+		}
+	}
 	style := lipgloss.NewStyle().Width(sidebarWidth)
 	files := m.session.Files()
 	fileIdx := m.session.FileIndex()
-	nameW, addW, delW, annotationW := sidebarColumnWidths(files, m.annotationCount)
-	previewHeight := sidebarAnnotationHeight(height, m.totalAnnotationCount())
+	nameW, addW, delW, threadW := sidebarColumnWidths(files, m.threadCount, m.fileStats)
+	previewHeight := sidebarThreadHeight(height, m.totalThreadCount())
 	fileHeight := height - previewHeight
 	var rows []string
-	rows = append(rows, sidebarHeader(m.sidebarStatsView(m.totalStats()), m.annotationsView(m.totalAnnotationCount())))
+	rows = append(rows, sidebarHeader(m.sidebarStatsView(m.totalStats()), m.threadsView(m.totalThreadCount())))
 	start := clamp(fileIdx-fileHeight/2, 0, max(0, len(files)-fileHeight+1))
 	end := min(len(files), start+fileHeight-1)
 	for i := start; i < end; i++ {
@@ -679,56 +728,63 @@ func (m Model) renderSidebar(height int) string {
 		if m.session.IsViewed(path) {
 			viewed = "✓"
 		}
-		stats := fileStats(f)
-		annotationCount := m.annotationCount(path)
+		stats := m.fileStats(f)
+		threadCount := m.threadCount(path)
 		addedText := fmt.Sprintf("%*s", addW, sidebarStat("+", stats.Added))
 		deletedText := fmt.Sprintf("%*s", delW, sidebarStat("-", stats.Deleted))
 		added := addStyle.Render(addedText)
 		deleted := deleteStyle.Render(deletedText)
-		line := fmt.Sprintf("%s%s %s %s %s %s", prefix, viewed, sidebarPath(path, nameW, false, viewed == "✓"), added, deleted, sidebarAnnotationView(annotationCount, annotationW, false))
+		line := fmt.Sprintf("%s%s %s %s %s %s", prefix, viewed, sidebarPath(path, nameW, false, viewed == "✓"), added, deleted, sidebarThreadView(threadCount, threadW, false))
 		if i == fileIdx {
-			line = selectedSidebarLine(prefix, viewed, nameW, path, addedText, deletedText, annotationCount, annotationW)
+			line = selectedSidebarLine(prefix, viewed, nameW, path, addedText, deletedText, threadCount, threadW)
 		} else if viewed == "✓" {
 			line = dimStyle.Render(line)
 		}
 		rows = append(rows, line)
 	}
 	if previewHeight > 0 {
-		rows = append(rows, m.renderAnnotationPreview(previewHeight)...)
+		rows = append(rows, m.renderThreadPreview(previewHeight)...)
 	}
-	return style.Render(strings.Join(rows, "\n"))
+	out := style.Render(strings.Join(rows, "\n"))
+	if m.viewCache != nil {
+		if len(m.viewCache) > 32 {
+			clear(m.viewCache)
+		}
+		m.viewCache[cacheKey] = out
+	}
+	return out
 }
 
-func sidebarAnnotationHeight(height, annotationCount int) int {
-	if annotationCount == 0 || height < sidebarMinFileRows+sidebarMinAnnotationRows {
+func sidebarThreadHeight(height, threadCount int) int {
+	if threadCount == 0 || height < sidebarMinFileRows+sidebarMinThreadRows {
 		return 0
 	}
 	available := height - sidebarMinFileRows
-	if available < sidebarMinAnnotationRows {
+	if available < sidebarMinThreadRows {
 		return 0
 	}
-	desired := sidebarAnnotationHeaderRows + annotationCount*sidebarRowsPerAnnotation
-	desired = max(sidebarMinAnnotationRows, desired)
-	maxPreview := min(sidebarAnnotationMaxRows, height/2)
+	desired := sidebarThreadHeaderRows + threadCount*sidebarRowsPerThread
+	desired = max(sidebarMinThreadRows, desired)
+	maxPreview := min(sidebarThreadMaxRows, height/2)
 	return min(maxPreview, min(available, desired))
 }
 
-func (m Model) annotationPositions() []review.AnnotationPosition {
-	return m.session.AnnotationPositions()
+func (m Model) threadPositions() []review.ThreadPosition {
+	return m.session.ThreadPositions()
 }
-func (m Model) renderAnnotationPreview(maxRows int) []string {
-	positions := m.annotationPositions()
+func (m Model) renderThreadPreview(maxRows int) []string {
+	positions := m.threadPositions()
 	if len(positions) == 0 || maxRows <= 1 {
 		return nil
 	}
-	selected, hasSelected := m.selectedAnnotation()
-	rows := []string{dimStyle.Render(""), titleStyle.Render("annotations")}
+	selected, hasSelected := m.selectedThread()
+	rows := []string{dimStyle.Render(""), titleStyle.Render("threads")}
 	remaining := maxRows - len(rows)
 	maxItems := max(1, remaining/2)
 	start := 0
 	if hasSelected {
 		for i, p := range positions {
-			if p.Annotation.ID == selected.ID {
+			if p.Thread.ID == selected.ID {
 				start = clamp(i-maxItems/2, 0, max(0, len(positions)-maxItems))
 				break
 			}
@@ -736,20 +792,20 @@ func (m Model) renderAnnotationPreview(maxRows int) []string {
 	}
 	for i := start; i < len(positions) && remaining > 0; i++ {
 		p := positions[i]
-		loc := fmt.Sprintf("● %s:%d", compactPath(p.Annotation.Path, sidebarWidth-8), p.Annotation.LineStart)
-		if p.Annotation.LineEnd != 0 && p.Annotation.LineEnd != p.Annotation.LineStart {
-			loc = fmt.Sprintf("● %s:%d-%d", compactPath(p.Annotation.Path, sidebarWidth-10), p.Annotation.LineStart, p.Annotation.LineEnd)
+		loc := fmt.Sprintf("● %s:%d", compactPath(p.Thread.Path, sidebarWidth-8), p.Thread.LineStart)
+		if p.Thread.LineEnd != 0 && p.Thread.LineEnd != p.Thread.LineStart {
+			loc = fmt.Sprintf("● %s:%d-%d", compactPath(p.Thread.Path, sidebarWidth-10), p.Thread.LineStart, p.Thread.LineEnd)
 		}
-		bodyText := strings.ReplaceAll(p.Annotation.Body, "\n", " ")
-		if author := annotationAuthor(p.Annotation); author != "" {
+		bodyText := strings.ReplaceAll(thread.Body(p.Thread), "\n", " ")
+		if author := threadAuthor(p.Thread); author != "" {
 			bodyText = author + ": " + bodyText
 		}
 		body := "  " + truncate(bodyText, sidebarWidth-2)
-		isSelected := hasSelected && selected.ID == p.Annotation.ID
+		isSelected := hasSelected && selected.ID == p.Thread.ID
 		if isSelected {
-			rows = append(rows, padRightStyled(selectedAnnotationStyle.Render(truncate(loc, sidebarWidth)), sidebarWidth, selectedStyle))
+			rows = append(rows, padRightStyled(selectedThreadStyle.Render(truncate(loc, sidebarWidth)), sidebarWidth, selectedStyle))
 		} else {
-			rows = append(rows, annotationStyle.Render(truncate(loc, sidebarWidth)))
+			rows = append(rows, threadStyle.Render(truncate(loc, sidebarWidth)))
 		}
 		remaining--
 		if remaining <= 0 {
@@ -767,9 +823,9 @@ func (m Model) renderAnnotationPreview(maxRows int) []string {
 
 func (m Model) renderDiffHeader(width int) string {
 	path := compactPath(m.currentPath(), max(12, width-18))
-	stats := m.statsView(fileStats(m.session.Files()[m.session.FileIndex()]))
-	if annotations := m.annotationCount(m.currentPath()); annotations > 0 {
-		stats = strings.TrimSpace(stats + " " + annotationStyle.Render(fmt.Sprintf("●%d", annotations)))
+	stats := m.statsView(m.fileStats(m.session.Files()[m.session.FileIndex()]))
+	if threads := m.threadCount(m.currentPath()); threads > 0 {
+		stats = strings.TrimSpace(stats + " " + threadStyle.Render(fmt.Sprintf("●%d", threads)))
 	}
 	line := titleStyle.Render(path)
 	if stats != "" {
@@ -782,12 +838,15 @@ func (m Model) renderStatus() string {
 	compareTarget := m.compareTargetLabel()
 	files := m.session.Files()
 	stats := m.statsView(m.totalStats())
-	if annotations := m.totalAnnotationCount(); annotations > 0 {
-		stats = strings.TrimSpace(stats + " " + annotationStyle.Render(fmt.Sprintf("●%d", annotations)))
+	if threads := m.totalThreadCount(); threads > 0 {
+		stats = strings.TrimSpace(stats + " " + threadStyle.Render(fmt.Sprintf("●%d", threads)))
 	}
 	parts := []string{dimStyle.Render(compareTarget), dimStyle.Render(fmt.Sprintf("%d/%d", min(m.session.FileIndex()+1, len(files)), len(files)))}
 	if stats != "" {
 		parts = append(parts, stats)
+	}
+	if m.store != nil && m.store.ReviewStatus(m.session.DiffHash()) == "approved" {
+		parts = append(parts, successStyle.Render("approved"))
 	}
 	if m.cfg.Offline {
 		parts = append(parts, dimStyle.Render("offline"))
@@ -804,8 +863,8 @@ func (m Model) renderStatus() string {
 	if m.session.HideViewed() {
 		parts = append(parts, dimStyle.Render("hide-viewed"))
 	}
-	if m.session.AnnotationsOnly() {
-		parts = append(parts, dimStyle.Render("annotations-only"))
+	if m.session.ThreadsOnly() {
+		parts = append(parts, dimStyle.Render("threads-only"))
 	}
 	if m.hideSidebar {
 		parts = append(parts, dimStyle.Render("sidebar-off"))
@@ -824,7 +883,7 @@ func (m Model) renderStatus() string {
 	}
 	if m.session.RangeActive() {
 		start, end := m.session.RangeIndexes()
-		parts = append(parts, annotationStyle.Render(fmt.Sprintf("range %d–%d", start+1, end+1)))
+		parts = append(parts, threadStyle.Render(fmt.Sprintf("range %d–%d", start+1, end+1)))
 	}
 	if m.status != "" {
 		parts = append(parts, statusView(m.status))
@@ -870,7 +929,7 @@ func prStatusView(pr gh.AttachedPR) string {
 
 func statusView(s string) string {
 	lower := strings.ToLower(s)
-	if strings.Contains(lower, "invalid") || strings.Contains(lower, "error") || strings.Contains(lower, "failed") || strings.Contains(lower, "unsupported") || strings.Contains(lower, "empty") || strings.HasPrefix(lower, "no ") || strings.Contains(lower, " must ") {
+	if strings.Contains(lower, "invalid") || strings.Contains(lower, "error") || strings.Contains(lower, "failed") || strings.Contains(lower, "unsupported") || strings.Contains(lower, "empty") || strings.Contains(lower, "cannot") || strings.HasPrefix(lower, "no ") || strings.Contains(lower, " must ") {
 		return errorStyle.Render(s)
 	}
 	if strings.Contains(lower, "saved") || strings.Contains(lower, "copied") || strings.Contains(lower, "marked") || strings.Contains(lower, "deleted") {
@@ -887,15 +946,15 @@ func (m Model) footerHints() string {
 		return ":" + m.jumpInput + "  enter jump · esc cancel"
 	}
 	if m.session.RangeActive() {
-		return "j/k extend · a annotate · r cancel"
+		return "j/k extend · a add thread · r cancel"
 	}
 	if m.showHelp {
 		return "? close"
 	}
-	if _, ok := m.selectedAnnotation(); ok {
-		return "e edit · d delete · ]a/[a annotations · y copy"
+	if _, ok := m.selectedThread(); ok {
+		return "enter reply · e edit · d delete · ]t/[t threads · y copy"
 	}
-	return "a annotate · r range · v viewed · ? help"
+	return "a add thread · A approve · r range · v viewed · ? help"
 }
 
 func (m Model) renderHelp() string {
@@ -904,20 +963,22 @@ func (m Model) renderHelp() string {
 		"  j/k        line up/down",
 		"  gg/G       top/bottom",
 		"  ]h/[h      next/previous hunk",
-		"  ]a/[a      next/previous annotation",
+		"  ]t/[t      next/previous thread",
 		"  :line      jump to file line",
 		"  n/p        next/previous file",
 		"  #          attach/change PR",
 		"",
 		"review",
 		"  v          toggle viewed",
+		"  A          approve review",
 		"  u          hide/show viewed files",
-		"  m          annotations-only filter",
+		"  m          threads-only filter",
 		"  r          start/cancel range",
-		"  a/e/d      annotate/edit/delete",
-		"  y/Y        copy selected/all annotations",
-		"  ⌥+enter    save annotation",
-		"  esc        cancel annotation",
+		"  a/e/d      add/edit/delete thread",
+		"  enter      reply to selected thread",
+		"  y/Y        copy selected/all threads",
+		"  ⌥+enter    save thread",
+		"  esc        cancel thread",
 		"",
 		"view",
 		"  s          split/unified",
@@ -946,68 +1007,75 @@ func helpBox(title string, lines []string, width int) string {
 	return strings.Join(rows, "\n")
 }
 
-func (m *Model) saveAnnotation() error {
+func (m *Model) saveThread() error {
+	if m.replyingThreadID != "" {
+		body := strings.TrimSpace(m.editor.Value())
+		if body == "" {
+			return fmt.Errorf("empty thread")
+		}
+		return m.store.Reply(m.replyingThreadID, thread.Message{Actor: thread.ActorHuman, Body: body})
+	}
 	target := m.pendingTarget
-	if m.editingAnnotationID == "" && target.LineStart == 0 {
+	if m.editingThreadID == "" && target.LineStart == 0 {
 		var err error
 		target, err = m.singleLineTarget()
 		if err != nil {
 			return err
 		}
 	}
-	return m.annotations.Save(m.currentPath(), m.session.DiffHash(), m.editingAnnotationID, target, m.editor.Value())
+	return m.threads.Save(m.currentPath(), m.session.DiffHash(), m.editingThreadID, target, m.editor.Value())
 }
 
 const (
-	sidebarWidth                = 38
-	sidebarMinFileRows          = 8
-	sidebarMinAnnotationRows    = 6
-	sidebarAnnotationMaxRows    = 24
-	sidebarAnnotationHeaderRows = 2
-	sidebarRowsPerAnnotation    = 2
-	lineNoWidth                 = 4
-	intralineContextLines       = 200
-	syntaxMaxFileLines          = 2500
-	splitSyntaxMaxFileLines     = 600
-	syntaxMaxLineWidth          = 500
-	syntaxCacheMaxEntries       = 4000
-	statusToastDuration         = 3 * time.Second
+	sidebarWidth            = 38
+	sidebarMinFileRows      = 8
+	sidebarMinThreadRows    = 6
+	sidebarThreadMaxRows    = 24
+	sidebarThreadHeaderRows = 2
+	sidebarRowsPerThread    = 2
+	lineNoWidth             = 4
+	intralineContextLines   = 200
+	syntaxMaxFileLines      = 2500
+	splitSyntaxMaxFileLines = 600
+	syntaxMaxLineWidth      = 500
+	syntaxCacheMaxEntries   = 4000
+	statusToastDuration     = 3 * time.Second
 )
 
 var (
-	loadingSpinnerFrames    = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
-	brandColor              = lipgloss.Color("180")
-	selectedBg              = lipgloss.Color("236")
-	addChangedBg            = lipgloss.Color("22")
-	deleteChangedBg         = lipgloss.Color("52")
-	annotationStyle         = lipgloss.NewStyle().Foreground(brandColor)
-	selectedAnnotationStyle = lipgloss.NewStyle().Foreground(brandColor).Background(selectedBg)
-	titleStyle              = lipgloss.NewStyle().Bold(true).Foreground(brandColor)
-	selectedStyle           = lipgloss.NewStyle().Background(selectedBg)
-	rangeBg                 = lipgloss.Color("235")
-	rangeStyle              = lipgloss.NewStyle().Background(rangeBg)
-	rangeAnnotationStyle    = lipgloss.NewStyle().Foreground(brandColor).Background(rangeBg)
-	rangeFooterStyle        = lipgloss.NewStyle().Foreground(brandColor)
-	dimStyle                = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	rangeDimStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Background(rangeBg)
-	selectedDimStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Background(selectedBg)
-	successStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
-	warningStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	errorStyle              = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	purpleStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("141"))
-	hunkColor               = lipgloss.Color("99")
-	hunkStyle               = lipgloss.NewStyle().Foreground(hunkColor)
-	selectedHunkStyle       = lipgloss.NewStyle().Foreground(hunkColor).Background(selectedBg)
-	rangeHunkStyle          = lipgloss.NewStyle().Foreground(hunkColor).Background(rangeBg)
-	addStyle                = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
-	selectedAddStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Background(selectedBg)
-	rangeAddStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Background(rangeBg)
-	deleteStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
-	selectedDeleteStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Background(selectedBg)
-	rangeDeleteStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Background(rangeBg)
-	helpStyle               = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(brandColor).Background(lipgloss.Color("235")).Padding(1, 2)
-	helpBorderStyle         = lipgloss.NewStyle().Foreground(brandColor).Background(lipgloss.Color("235"))
-	helpBgStyle             = lipgloss.NewStyle().Background(lipgloss.Color("235"))
+	loadingSpinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	brandColor           = lipgloss.Color("180")
+	selectedBg           = lipgloss.Color("236")
+	addChangedBg         = lipgloss.Color("22")
+	deleteChangedBg      = lipgloss.Color("52")
+	threadStyle          = lipgloss.NewStyle().Foreground(brandColor)
+	selectedThreadStyle  = lipgloss.NewStyle().Foreground(brandColor).Background(selectedBg)
+	titleStyle           = lipgloss.NewStyle().Bold(true).Foreground(brandColor)
+	selectedStyle        = lipgloss.NewStyle().Background(selectedBg)
+	rangeBg              = lipgloss.Color("235")
+	rangeStyle           = lipgloss.NewStyle().Background(rangeBg)
+	rangeThreadStyle     = lipgloss.NewStyle().Foreground(brandColor).Background(rangeBg)
+	rangeFooterStyle     = lipgloss.NewStyle().Foreground(brandColor)
+	dimStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	rangeDimStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Background(rangeBg)
+	selectedDimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Background(selectedBg)
+	successStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	warningStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	errorStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	purpleStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("141"))
+	hunkColor            = lipgloss.Color("99")
+	hunkStyle            = lipgloss.NewStyle().Foreground(hunkColor)
+	selectedHunkStyle    = lipgloss.NewStyle().Foreground(hunkColor).Background(selectedBg)
+	rangeHunkStyle       = lipgloss.NewStyle().Foreground(hunkColor).Background(rangeBg)
+	addStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	selectedAddStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Background(selectedBg)
+	rangeAddStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Background(rangeBg)
+	deleteStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
+	selectedDeleteStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Background(selectedBg)
+	rangeDeleteStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Background(rangeBg)
+	helpStyle            = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(brandColor).Background(lipgloss.Color("235")).Padding(1, 2)
+	helpBorderStyle      = lipgloss.NewStyle().Foreground(brandColor).Background(lipgloss.Color("235"))
+	helpBgStyle          = lipgloss.NewStyle().Background(lipgloss.Color("235"))
 )
 
 func colorLine(kind diff.Kind, s string) string {
@@ -1105,7 +1173,14 @@ func padRightStyled(s string, width int, style lipgloss.Style) string {
 	return s + style.Render(strings.Repeat(" ", width-w))
 }
 
-func annotationAuthor(n annotate.Annotation) string {
+func threadAuthor(n thread.Thread) string {
+	msg := thread.FirstMessage(n)
+	if msg.AuthorName != "" {
+		return msg.AuthorName
+	}
+	if msg.AuthorLogin != "" {
+		return msg.AuthorLogin
+	}
 	if n.GitHub == nil {
 		return ""
 	}
@@ -1115,20 +1190,23 @@ func annotationAuthor(n annotate.Annotation) string {
 	return n.GitHub.AuthorLogin
 }
 
-func annotationMarkdown(n annotate.Annotation) string {
+func threadText(n thread.Thread) string {
 	loc := fmt.Sprintf("%s:%d", n.Path, n.LineStart)
 	if n.LineEnd != 0 && n.LineEnd != n.LineStart {
 		loc = fmt.Sprintf("%s:%d-%d", n.Path, n.LineStart, n.LineEnd)
 	}
-	body := n.Body
-	if author := annotationAuthor(n); author != "" {
+	body := thread.Body(n)
+	if author := threadAuthor(n); author != "" {
 		body = author + ": " + body
 	}
 	out := fmt.Sprintf("- [ ] `%s` (%s) %s", loc, n.Side, body)
-	for _, r := range n.Replies {
+	for _, r := range n.Messages[1:] {
 		author := r.AuthorLogin
 		if r.AuthorName != "" {
 			author = r.AuthorName
+		}
+		if author == "" && r.Actor != "" {
+			author = string(r.Actor)
 		}
 		if author != "" {
 			out += fmt.Sprintf("\n  - %s: %s", author, r.Body)

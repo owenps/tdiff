@@ -1,9 +1,9 @@
 package review
 
 import (
-	"github.com/owenps/tdiff/internal/annotate"
-	"github.com/owenps/tdiff/internal/annotationtarget"
 	"github.com/owenps/tdiff/internal/diff"
+	"github.com/owenps/tdiff/internal/thread"
+	"github.com/owenps/tdiff/internal/threadtarget"
 )
 
 type DisplayLine struct {
@@ -40,11 +40,11 @@ func (c *Cursor) SetFiles(files []diff.File) {
 }
 
 type FileFilter struct {
-	HideViewed      bool
-	AnnotationsOnly bool
-	DiffHash        string
-	IsViewed        func(path, diffHash string) bool
-	AnnotationCount func(path string) int
+	HideViewed  bool
+	ThreadsOnly bool
+	DiffHash    string
+	IsViewed    func(path, diffHash string) bool
+	ThreadCount func(path string) int
 }
 
 func (c *Cursor) SetFilteredFiles(files []diff.File, filter FileFilter) {
@@ -58,7 +58,7 @@ func FilterFiles(files []diff.File, filter FileFilter) []diff.File {
 		if filter.HideViewed && filter.IsViewed != nil && filter.IsViewed(path, filter.DiffHash) {
 			continue
 		}
-		if filter.AnnotationsOnly && filter.AnnotationCount != nil && filter.AnnotationCount(path) == 0 {
+		if filter.ThreadsOnly && filter.ThreadCount != nil && filter.ThreadCount(path) == 0 {
 			continue
 		}
 		filtered = append(filtered, f)
@@ -245,21 +245,21 @@ func (c *Cursor) AdvanceToNextUnviewed(diffHash string, isViewed func(path, diff
 	})
 }
 
-type AnnotationPosition struct {
-	FileIdx    int
-	LineIdx    int
-	Annotation annotate.Annotation
+type ThreadPosition struct {
+	FileIdx int
+	LineIdx int
+	Thread  thread.Thread
 }
 
-func (c Cursor) AnnotationPositions(annotationsForPath func(string) []annotate.Annotation) []AnnotationPosition {
-	var out []AnnotationPosition
+func (c Cursor) ThreadPositions(threadsForPath func(string) []thread.Thread) []ThreadPosition {
+	var out []ThreadPosition
 	for fileIdx, f := range c.files {
 		path := f.Path()
 		lines := c.displayLinesForFileIndex(fileIdx)
-		for _, annotation := range annotationsForPath(path) {
+		for _, thread := range threadsForPath(path) {
 			for lineIdx, dl := range lines {
-				if dl.Line != nil && annotationtarget.MatchesLine(annotation, *dl.Line) {
-					out = append(out, AnnotationPosition{FileIdx: fileIdx, LineIdx: lineIdx, Annotation: annotation})
+				if dl.Line != nil && threadtarget.MatchesLine(thread, *dl.Line) {
+					out = append(out, ThreadPosition{FileIdx: fileIdx, LineIdx: lineIdx, Thread: thread})
 					break
 				}
 			}
@@ -268,8 +268,8 @@ func (c Cursor) AnnotationPositions(annotationsForPath func(string) []annotate.A
 	return out
 }
 
-func (c *Cursor) JumpAnnotation(delta, height int, annotationsForPath func(string) []annotate.Annotation) (int, int, bool) {
-	positions := c.AnnotationPositions(annotationsForPath)
+func (c *Cursor) JumpThread(delta, height int, threadsForPath func(string) []thread.Thread) (int, int, bool) {
+	positions := c.ThreadPositions(threadsForPath)
 	if len(positions) == 0 {
 		return 0, 0, false
 	}
@@ -299,12 +299,12 @@ func (c *Cursor) JumpAnnotation(delta, height int, annotationsForPath func(strin
 	return idx + 1, len(positions), true
 }
 
-func (c Cursor) SelectedAnnotation(annotationAt func(path string, line diff.Line) (annotate.Annotation, bool)) (annotate.Annotation, bool) {
+func (c Cursor) SelectedThread(threadAt func(path string, line diff.Line) (thread.Thread, bool)) (thread.Thread, bool) {
 	dl := c.SelectedLine()
-	if dl.Line == nil || annotationAt == nil {
-		return annotate.Annotation{}, false
+	if dl.Line == nil || threadAt == nil {
+		return thread.Thread{}, false
 	}
-	return annotationAt(c.CurrentPath(), *dl.Line)
+	return threadAt(c.CurrentPath(), *dl.Line)
 }
 
 func DisplayLinesForFile(f diff.File) []DisplayLine {

@@ -3,9 +3,9 @@ package review
 import (
 	"fmt"
 
-	"github.com/owenps/tdiff/internal/annotate"
-	"github.com/owenps/tdiff/internal/annotationtarget"
 	"github.com/owenps/tdiff/internal/diff"
+	"github.com/owenps/tdiff/internal/thread"
+	"github.com/owenps/tdiff/internal/threadtarget"
 )
 
 type ViewedStore interface {
@@ -14,8 +14,8 @@ type ViewedStore interface {
 	IsViewed(path, diffHash string) bool
 }
 
-type AnnotationStore interface {
-	AnnotationsFor(path string) []annotate.Annotation
+type ThreadStore interface {
+	ThreadsFor(path string) []thread.Thread
 }
 
 type ViewedToggleResult struct {
@@ -63,10 +63,10 @@ type Session struct {
 	diffHash string
 	cursor   Cursor
 
-	hideViewed      bool
-	annotationsOnly bool
-	viewed          ViewedStore
-	annotations     AnnotationStore
+	hideViewed  bool
+	threadsOnly bool
+	viewed      ViewedStore
+	threads     ThreadStore
 }
 
 func NewSession(files []diff.File) Session {
@@ -79,15 +79,15 @@ func (s *Session) SetSnapshot(files []diff.File, diffHash string) {
 	s.applyFilters()
 }
 
-func (s *Session) SetStores(viewed ViewedStore, annotations AnnotationStore) {
+func (s *Session) SetStores(viewed ViewedStore, threads ThreadStore) {
 	s.viewed = viewed
-	s.annotations = annotations
+	s.threads = threads
 	s.applyFilters()
 }
 
-func (s *Session) SetFilters(hideViewed, annotationsOnly bool) {
+func (s *Session) SetFilters(hideViewed, threadsOnly bool) {
 	s.hideViewed = hideViewed
-	s.annotationsOnly = annotationsOnly
+	s.threadsOnly = threadsOnly
 	s.applyFilters()
 }
 
@@ -97,15 +97,15 @@ func (s *Session) ToggleHideViewed() bool {
 	return s.hideViewed
 }
 
-func (s *Session) ToggleAnnotationsOnly() bool {
-	s.annotationsOnly = !s.annotationsOnly
+func (s *Session) ToggleThreadsOnly() bool {
+	s.threadsOnly = !s.threadsOnly
 	s.applyFilters()
-	return s.annotationsOnly
+	return s.threadsOnly
 }
 
 func (s Session) HideViewed() bool { return s.hideViewed }
 
-func (s Session) AnnotationsOnly() bool { return s.annotationsOnly }
+func (s Session) ThreadsOnly() bool { return s.threadsOnly }
 
 func (s *Session) RefreshFilters() {
 	s.applyFilters()
@@ -116,16 +116,16 @@ func (s *Session) applyFilters() {
 	if s.viewed != nil {
 		isViewed = s.viewed.IsViewed
 	}
-	var annotationCount func(path string) int
-	if s.annotations != nil {
-		annotationCount = s.AnnotationCount
+	var threadCount func(path string) int
+	if s.threads != nil {
+		threadCount = s.ThreadCount
 	}
 	s.cursor.SetFilteredFiles(s.allFiles, FileFilter{
-		HideViewed:      s.hideViewed,
-		AnnotationsOnly: s.annotationsOnly,
-		DiffHash:        s.diffHash,
-		IsViewed:        isViewed,
-		AnnotationCount: annotationCount,
+		HideViewed:  s.hideViewed,
+		ThreadsOnly: s.threadsOnly,
+		DiffHash:    s.diffHash,
+		IsViewed:    isViewed,
+		ThreadCount: threadCount,
 	})
 }
 
@@ -219,11 +219,11 @@ func (s Session) IsViewed(path string) bool {
 	return s.viewed != nil && s.viewed.IsViewed(path, s.diffHash)
 }
 
-func (s Session) AnnotationCount(path string) int {
-	if s.annotations == nil {
+func (s Session) ThreadCount(path string) int {
+	if s.threads == nil {
 		return 0
 	}
-	return len(s.annotations.AnnotationsFor(path))
+	return len(s.threads.ThreadsFor(path))
 }
 
 func (s *Session) ToggleViewed() (ViewedToggleResult, error) {
@@ -258,38 +258,38 @@ func (s *Session) AdvanceToNextUnviewed() bool {
 		return s.viewed != nil && s.viewed.IsViewed(path, diffHash)
 	})
 }
-func (s Session) AnnotationPositions() []AnnotationPosition {
-	if s.annotations == nil {
+func (s Session) ThreadPositions() []ThreadPosition {
+	if s.threads == nil {
 		return nil
 	}
-	return s.cursor.AnnotationPositions(s.annotations.AnnotationsFor)
+	return s.cursor.ThreadPositions(s.threads.ThreadsFor)
 }
-func (s *Session) JumpAnnotation(delta, height int) (int, int, bool) {
-	if s.annotations == nil {
+func (s *Session) JumpThread(delta, height int) (int, int, bool) {
+	if s.threads == nil {
 		return 0, 0, false
 	}
-	return s.cursor.JumpAnnotation(delta, height, s.annotations.AnnotationsFor)
+	return s.cursor.JumpThread(delta, height, s.threads.ThreadsFor)
 }
-func (s Session) SelectedAnnotation() (annotate.Annotation, bool) {
-	if s.annotations == nil {
-		return annotate.Annotation{}, false
+func (s Session) SelectedThread() (thread.Thread, bool) {
+	if s.threads == nil {
+		return thread.Thread{}, false
 	}
 	dl := s.SelectedLine()
 	if dl.Line == nil {
-		return annotate.Annotation{}, false
+		return thread.Thread{}, false
 	}
-	return AnnotationAtLine(s.annotations.AnnotationsFor(s.CurrentPath()), *dl.Line)
+	return ThreadAtLine(s.threads.ThreadsFor(s.CurrentPath()), *dl.Line)
 }
 
-func AnnotationAtLine(annotations []annotate.Annotation, line diff.Line) (annotate.Annotation, bool) {
-	side, _, ok := annotationtarget.ForLine(line)
+func ThreadAtLine(threads []thread.Thread, line diff.Line) (thread.Thread, bool) {
+	side, _, ok := threadtarget.ForLine(line)
 	if !ok {
-		return annotate.Annotation{}, false
+		return thread.Thread{}, false
 	}
-	for _, n := range annotations {
-		if n.Side == side && annotationtarget.MatchesLine(n, line) {
+	for _, n := range threads {
+		if n.Side == side && threadtarget.MatchesLine(n, line) {
 			return n, true
 		}
 	}
-	return annotate.Annotation{}, false
+	return thread.Thread{}, false
 }

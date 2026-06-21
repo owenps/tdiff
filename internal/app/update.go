@@ -234,6 +234,10 @@ func (m Model) updateKey(msg tea.KeyMsg, previousStatus string) (tea.Model, tea.
 		m.pendingKey = ""
 		m.hideSidebar = !m.hideSidebar
 		m.status = fmt.Sprintf("sidebar: %t", !m.hideSidebar)
+	case "i":
+		m.pendingKey = ""
+		m.hideInlineThreads = !m.hideInlineThreads
+		m.status = fmt.Sprintf("inline threads: %t", !m.hideInlineThreads)
 	case "y":
 		m.copySelectedThread()
 	case "Y":
@@ -396,7 +400,10 @@ func (m Model) threadKey(previousStatus string) (tea.Model, tea.Cmd) {
 			m.status = "github thread readonly"
 			return m, m.statusToastCmd(previousStatus)
 		}
-		m.startEditThread(selected)
+		if err := m.startEditThread(selected); err != nil {
+			m.status = err.Error()
+			return m, m.statusToastCmd(previousStatus)
+		}
 		return m, textarea.Blink
 	}
 	if target, err := m.singleLineTarget(); err == nil {
@@ -427,7 +434,10 @@ func (m Model) editThreadKey(previousStatus string) (tea.Model, tea.Cmd) {
 			m.status = "github thread readonly"
 			return m, m.statusToastCmd(previousStatus)
 		}
-		m.startEditThread(selected)
+		if err := m.startEditThread(selected); err != nil {
+			m.status = err.Error()
+			return m, m.statusToastCmd(previousStatus)
+		}
 		return m, textarea.Blink
 	}
 	m.status = "no thread on selected line"

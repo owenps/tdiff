@@ -12,7 +12,7 @@ import (
 
 type Store interface {
 	Add(thread.Thread) error
-	UpdateFirstMessage(id, body string) error
+	UpdateLatestMessage(id, body string) error
 	Delete(id string) error
 	ThreadsFor(path string) []thread.Thread
 }
@@ -131,7 +131,7 @@ func (w Workflow) Save(path, diffHash, editingID string, target Target, body str
 		return fmt.Errorf("empty thread")
 	}
 	if editingID != "" {
-		return w.store.UpdateFirstMessage(editingID, body)
+		return w.store.UpdateLatestMessage(editingID, body)
 	}
 	if target.LineStart == 0 {
 		return fmt.Errorf("no thread target")

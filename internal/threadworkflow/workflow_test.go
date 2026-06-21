@@ -19,7 +19,7 @@ func (s *fakeStore) Add(n thread.Thread) error {
 	s.threads = append(s.threads, n)
 	return nil
 }
-func (s *fakeStore) UpdateFirstMessage(id, body string) error {
+func (s *fakeStore) UpdateLatestMessage(id, body string) error {
 	s.updated = id + ":" + body
 	return nil
 }
@@ -73,6 +73,17 @@ func TestSaveAddsThread(t *testing.T) {
 	}
 	if store.added.Path != "foo.go" || thread.Body(store.added) != "body" || store.added.LineStart != 7 || store.added.LineEnd != 8 {
 		t.Fatalf("added=%+v", store.added)
+	}
+}
+
+func TestSaveEditsLatestMessage(t *testing.T) {
+	store := &fakeStore{}
+	w := NewWorkflow(store)
+	if err := w.Save("foo.go", "hash", "n1", Target{}, " edited "); err != nil {
+		t.Fatal(err)
+	}
+	if store.updated != "n1:edited" {
+		t.Fatalf("updated = %q", store.updated)
 	}
 }
 

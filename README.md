@@ -37,6 +37,24 @@ Default view shows branch changes plus staged/unstaged/untracked working tree ch
 
 For GitHub integration, install the `gh` CLI.
 
+## Working with agents
+
+Tell your agent:
+
+```text
+Use tdiff for review comments. Run `tdiff agent help`, then wait for my tdiff review events and respond in threads.
+```
+
+Agent loop:
+
+```sh
+tdiff review watch
+tdiff review context --json
+tdiff thread reply T123 --actor agent --body "Fixed; added test"
+```
+
+`tdiff review watch` emits compact text events. Use `--json` for JSONL.
+
 ## CLI
 
 ```sh
@@ -45,11 +63,15 @@ tdiff --staged
 tdiff --unstaged
 tdiff --offline
 
+tdiff agent help
+
 # agent/review API
 tdiff review status --json
 tdiff review context --json
 tdiff review approve
 tdiff review unapprove
+tdiff review watch
+# JSONL if needed:
 tdiff review watch --json
 
 tdiff thread list --json
@@ -60,6 +82,9 @@ tdiff thread resolve T123
 tdiff thread reopen T123
 # use --body - to read long thread text from stdin
 
+tdiff events
+tdiff events --follow
+# JSONL if needed:
 tdiff events --json
 tdiff events --follow --json
 ```
@@ -96,6 +121,7 @@ This includes review approval, threads, messages, viewed-file state, and GitHub 
 - <kbd>s</kbd> toggle split/unified placeholder
 - <kbd>#</kbd> attach/change GitHub PR (disabled with `--offline`)
 - <kbd>b</kbd> show/hide left sidebar
+- <kbd>i</kbd> show/hide inline threads
 - <kbd>x</kbd> toggle syntax highlighting
 - <kbd>c</kbd> toggle context dimming
 - <kbd>w</kbd> wrap cursor line

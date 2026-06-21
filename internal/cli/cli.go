@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	gh "github.com/owenps/tdiff/internal/github"
 	"github.com/owenps/tdiff/internal/snapshot"
 	"github.com/owenps/tdiff/internal/thread"
+	"github.com/owenps/tdiff/internal/threadtarget"
 )
 
 type diffFlags struct {
@@ -66,6 +68,11 @@ func Run() error {
 	ctx := context.Background()
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "help", "--help", "-h":
+			fmt.Print(mainHelpText())
+			return nil
+		case "agent":
+			return runAgent(os.Args[2:])
 		case "review":
 			return runReview(ctx, os.Args[2:])
 		case "thread":
@@ -77,6 +84,74 @@ func Run() error {
 		}
 	}
 	return runTUI(ctx, os.Args[1:])
+}
+
+func runAgent(args []string) error {
+	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+		fmt.Print(agentHelpText())
+		return nil
+	}
+	return fmt.Errorf("unknown agent command %q", args[0])
+}
+
+func mainHelpText() string {
+	return `tdiff - review changes like a PR, without leaving terminal
+
+Usage:
+  tdiff [--base <ref>] [--staged|--unstaged] [--offline]
+  tdiff review status|context|approve|unapprove|watch
+  tdiff thread list|show|add|reply|resolve|reopen
+  tdiff events [--follow]
+  tdiff agent help
+
+Agent quick start:
+  tdiff agent help      # instructions for coding agents watching review comments
+  tdiff review watch    # compact text event stream; add --json for JSONL
+
+Common commands:
+  tdiff review context --json
+  tdiff thread show <id> --json
+  tdiff thread reply <id> --actor agent --body "Fixed; added test"
+
+`
+}
+
+func agentHelpText() string {
+	return `tdiff agent help
+
+Purpose:
+  Human reviews your code in tdiff. You watch events, inspect threads on demand,
+  fix code, and reply in the relevant thread.
+
+Workflow:
+  1. Ask human to run: tdiff
+  2. Watch comments/events: tdiff review watch
+  3. On thread.created or thread.replied, inspect if needed:
+       tdiff thread show <thread_id> --json
+       tdiff review context --json
+  4. Fix code, run relevant checks.
+  5. Reply in the same thread:
+       tdiff thread reply <thread_id> --actor agent --body "Fixed; ran go test ./..."
+  6. Resolve only when clearly handled:
+       tdiff thread resolve <thread_id> --actor agent
+  7. Stop when review.approved appears for the current diff.
+
+Event stream:
+  tdiff review watch emits compact text with explicit keys, for example:
+    E1 thread.created thread_id=T1 actor=human path="internal/foo.go" line_start=3 body_preview="Handle nil repo"
+
+Rules:
+  - Treat open current human threads as work items.
+  - Treat events as notifications; use thread/context JSON for source of truth.
+  - Do not ask user to copy/paste comments; read tdiff directly.
+  - Do not approve unless explicitly asked by user.
+  - Always reply in-thread after acting, with brief evidence.
+
+JSON options:
+  tdiff review watch --json
+  tdiff events --follow --json
+
+`
 }
 
 func runTUI(ctx context.Context, args []string) error {
@@ -171,18 +246,15 @@ func runReview(ctx context.Context, args []string) error {
 		return nil
 	case "watch":
 		dfs := newDiffFlagSet("tdiff review watch")
-		jsonOut := dfs.fs.Bool("json", false, "emit JSON")
+		jsonOut := dfs.fs.Bool("json", false, "emit JSON lines")
 		if err := dfs.fs.Parse(args[1:]); err != nil {
 			return err
-		}
-		if !*jsonOut {
-			return errors.New("review watch currently requires --json")
 		}
 		loaded, err := loadReview(ctx, dfs.opts())
 		if err != nil {
 			return err
 		}
-		return streamEvents(loaded.store.EventsPath(), true, true)
+		return streamEvents(loaded.store.EventsPath(), true, *jsonOut)
 	default:
 		return fmt.Errorf("unknown review command %q", sub)
 	}
@@ -357,9 +429,6 @@ func runEvents(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if !*jsonOut {
-		return errors.New("events currently requires --json")
-	}
 	repo, err := git.Open(ctx)
 	if err != nil {
 		return err
@@ -368,7 +437,7 @@ func runEvents(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return streamEvents(store.EventsPath(), *follow, true)
+	return streamEvents(store.EventsPath(), *follow, *jsonOut)
 }
 
 type diffFlagSet struct {
@@ -465,23 +534,7 @@ func freshness(t thread.Thread, files []diff.File) string {
 }
 
 func isThreadCurrent(t thread.Thread, files []diff.File) bool {
-	for _, f := range files {
-		if f.Path() != t.Path {
-			continue
-		}
-		for _, h := range f.Hunks {
-			for _, l := range h.Lines {
-				lineNo := l.NewNo
-				if t.Side == thread.SideOld {
-					lineNo = l.OldNo
-				}
-				if lineNo >= t.LineStart && lineNo <= t.LineEnd {
-					return true
-				}
-			}
-		}
-	}
-	return false
+	return threadtarget.CurrentInFiles(t, files)
 }
 
 type cliTarget struct {
@@ -490,27 +543,11 @@ type cliTarget struct {
 }
 
 func targetFromSnapshot(files []diff.File, path string, side thread.Side, start, end int) (cliTarget, error) {
-	for _, f := range files {
-		if f.Path() != path {
-			continue
-		}
-		for _, h := range f.Hunks {
-			var lines []string
-			for _, l := range h.Lines {
-				lineNo := l.NewNo
-				if side == thread.SideOld {
-					lineNo = l.OldNo
-				}
-				if lineNo >= start && lineNo <= end {
-					lines = append(lines, l.Text)
-				}
-			}
-			if len(lines) > 0 {
-				return cliTarget{hunkHeader: h.Header, context: strings.Join(lines, "\n")}, nil
-			}
-		}
+	hunkHeader, context, ok := threadtarget.ContextForRange(files, path, side, start, end)
+	if !ok {
+		return cliTarget{}, fmt.Errorf("target not found in current diff: %s:%d-%d (%s)", path, start, end, side)
 	}
-	return cliTarget{}, fmt.Errorf("target not found in current diff: %s:%d-%d (%s)", path, start, end, side)
+	return cliTarget{hunkHeader: hunkHeader, context: context}, nil
 }
 
 func parseSide(s string) (thread.Side, error) {
@@ -557,11 +594,21 @@ func writeJSON(v any) error {
 }
 
 func streamEvents(path string, follow bool, jsonLines bool) error {
-	var offset int64
-	if err := readEventsFrom(path, 0, func(line []byte) error {
-		fmt.Println(string(line))
+	emit := func(line []byte) error {
+		if jsonLines {
+			fmt.Println(string(line))
+			return nil
+		}
+		text, err := eventTextLine(line)
+		if err != nil {
+			return err
+		}
+		fmt.Println(text)
 		return nil
-	}, &offset); err != nil {
+	}
+
+	var offset int64
+	if err := readEventsFrom(path, 0, emit, &offset); err != nil {
 		return err
 	}
 	if !follow {
@@ -569,14 +616,56 @@ func streamEvents(path string, follow bool, jsonLines bool) error {
 	}
 	for {
 		time.Sleep(500 * time.Millisecond)
-		if err := readEventsFrom(path, offset, func(line []byte) error {
-			fmt.Println(string(line))
-			return nil
-		}, &offset); err != nil {
+		if err := readEventsFrom(path, offset, emit, &offset); err != nil {
 			return err
 		}
-		_ = jsonLines
 	}
+}
+
+func eventTextLine(line []byte) (string, error) {
+	var e thread.Event
+	if err := json.Unmarshal(line, &e); err != nil {
+		return "", err
+	}
+	parts := []string{e.ID, e.Type}
+	if e.ThreadID != "" {
+		parts = append(parts, "thread_id="+e.ThreadID)
+	}
+	if e.Actor != "" {
+		parts = append(parts, "actor="+string(e.Actor))
+	}
+	if e.Status != "" {
+		parts = append(parts, "status="+string(e.Status))
+	}
+	if e.Path != "" {
+		parts = append(parts, "path="+strconv.Quote(e.Path))
+	}
+	if e.LineStart != 0 {
+		parts = append(parts, fmt.Sprintf("line_start=%d", e.LineStart))
+	}
+	if e.LineEnd != 0 && e.LineEnd != e.LineStart {
+		parts = append(parts, fmt.Sprintf("line_end=%d", e.LineEnd))
+	}
+	if e.Side != "" {
+		parts = append(parts, "side="+string(e.Side))
+	}
+	if e.DiffHash != "" {
+		parts = append(parts, "diff_hash="+e.DiffHash)
+	}
+	if body := eventBodyPreview(e.Body); body != "" {
+		parts = append(parts, "body_preview="+strconv.Quote(body))
+	}
+	return strings.Join(parts, " "), nil
+}
+
+func eventBodyPreview(body string) string {
+	body = firstLine(body)
+	const max = 160
+	runes := []rune(body)
+	if len(runes) <= max {
+		return body
+	}
+	return string(runes[:max]) + "…"
 }
 
 func readEventsFrom(path string, offset int64, emit func([]byte) error, newOffset *int64) error {

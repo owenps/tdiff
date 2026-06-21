@@ -43,6 +43,24 @@ func TestRenderSidebarUsesCompactedStats(t *testing.T) {
 	}
 }
 
+func TestRenderSidebarShowsReplyCounts(t *testing.T) {
+	file := diff.File{NewPath: "file.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+new"}}}}}
+	store := &thread.Store{Threads: []thread.Thread{{ID: "n1", Path: "file.go", Side: thread.SideNew, LineStart: 1, LineEnd: 1, Messages: []thread.Message{
+		{Actor: thread.ActorHuman, Body: "note"},
+		{Actor: thread.ActorAgent, Body: "reply one"},
+		{Actor: thread.ActorHuman, Body: "reply two"},
+	}}}}
+	workflow := threadworkflow.NewWorkflow(store)
+	session := review.NewSession([]diff.File{file})
+	session.SetStores(store, store)
+	m := Model{store: store, threads: workflow, session: session, width: 100}
+
+	out := xansi.Strip(m.renderSidebar(16))
+	if !strings.Contains(out, "↳2") {
+		t.Fatalf("sidebar missing reply count:\n%s", out)
+	}
+}
+
 func TestRenderSidebarGivesThreadsMoreRoomWhenScreenPermits(t *testing.T) {
 	var files []diff.File
 	var notes []thread.Thread

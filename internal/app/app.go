@@ -39,34 +39,35 @@ type Model struct {
 	width  int
 	height int
 
-	loadingFrame     int
-	pendingKey       string
-	jumpPrompt       bool
-	jumpInput        string
-	split            bool
-	syntax           bool
-	contextDim       bool
-	wrapCursorLine   bool
-	hideLineNumbers  bool
-	showHelp         bool
-	hideSidebar      bool
-	composing        bool
-	editingThreadID  string
-	replyingThreadID string
-	pendingTarget    threadworkflow.Target
-	editor           textarea.Model
-	prPicker         prPicker
-	prAttaching      bool
-	refreshing       bool
-	status           string
-	statusID         int
-	composerBaseView string
-	viewCache        map[string]string
-	statsCache       map[string]diffStats
-	syntaxCache      map[string]string
-	splitHunkCache   map[string]map[string]bool
-	splitNavCache    map[string]splitNav
-	splitOffset      int
+	loadingFrame      int
+	pendingKey        string
+	jumpPrompt        bool
+	jumpInput         string
+	split             bool
+	syntax            bool
+	contextDim        bool
+	wrapCursorLine    bool
+	hideLineNumbers   bool
+	showHelp          bool
+	hideSidebar       bool
+	hideInlineThreads bool
+	composing         bool
+	editingThreadID   string
+	replyingThreadID  string
+	pendingTarget     threadworkflow.Target
+	editor            textarea.Model
+	prPicker          prPicker
+	prAttaching       bool
+	refreshing        bool
+	status            string
+	statusID          int
+	composerBaseView  string
+	viewCache         map[string]string
+	statsCache        map[string]diffStats
+	syntaxCache       map[string]string
+	splitHunkCache    map[string]map[string]bool
+	splitNavCache     map[string]splitNav
+	splitOffset       int
 }
 
 func New(ctx context.Context, cfg Config) (Model, error) {
@@ -81,10 +82,12 @@ func New(ctx context.Context, cfg Config) (Model, error) {
 	m := Model{repo: repo, cfg: cfg, store: store, threads: threadworkflow.NewWorkflow(store), session: review.NewSession(nil), syntax: true, contextDim: true, viewCache: make(map[string]string), statsCache: make(map[string]diffStats), syntaxCache: make(map[string]string), splitHunkCache: make(map[string]map[string]bool), splitNavCache: make(map[string]splitNav)}
 	m.session.SetStores(store, store)
 	m.editor = textarea.New()
-	m.editor.Placeholder = "thread"
+	m.editor.Placeholder = "write a review comment…"
 	m.editor.CharLimit = 4000
 	m.editor.SetHeight(5)
 	m.editor.ShowLineNumbers = false
+	m.editor.FocusedStyle.Prompt = threadStyle
+	m.editor.BlurredStyle.Prompt = threadStyle
 	if err := m.reload(ctx); err != nil {
 		return Model{}, err
 	}
@@ -151,7 +154,7 @@ func (m Model) View() string {
 		if view == "" {
 			view = m.reviewView()
 		}
-		return view + "\n" + m.editor.View() + "\n⌥+enter save · esc cancel"
+		return view + "\n" + m.renderComposer()
 	}
 	if m.prPicker.Active() {
 		return m.reviewView() + "\n" + m.prPicker.View(m.width, m.loadingFrame)
@@ -162,6 +165,10 @@ func (m Model) View() string {
 		return overlay(view, m.renderHelp(), m.width, m.height)
 	}
 	return view
+}
+
+func (m Model) renderComposer() string {
+	return m.editor.View() + "\n" + dimStyle.Render("⌥+enter save · esc cancel")
 }
 
 func (m Model) ready() bool {
@@ -313,15 +320,20 @@ func (m Model) selectedThread() (thread.Thread, bool) {
 	return m.session.SelectedThread()
 }
 
-func (m *Model) startEditThread(t thread.Thread) {
+func (m *Model) startEditThread(t thread.Thread) error {
+	if !thread.CanEditLatestMessage(t) {
+		return fmt.Errorf("can only edit latest local message")
+	}
 	m.composerBaseView = m.reviewView()
 	m.editingThreadID = t.ID
 	m.replyingThreadID = ""
 	m.pendingTarget = threadworkflow.Target{}
 	m.editor.Reset()
-	m.editor.SetValue(thread.Body(t))
+	m.editor.Placeholder = "edit latest reply…"
+	m.editor.SetValue(thread.LastMessage(t).Body)
 	m.composing = true
 	m.editor.Focus()
+	return nil
 }
 
 func (m *Model) startReplyThread(t thread.Thread) {
@@ -330,6 +342,7 @@ func (m *Model) startReplyThread(t thread.Thread) {
 	m.replyingThreadID = t.ID
 	m.pendingTarget = threadworkflow.Target{}
 	m.editor.Reset()
+	m.editor.Placeholder = "reply…"
 	m.composing = true
 	m.editor.Focus()
 }
@@ -340,6 +353,7 @@ func (m *Model) startNewThread(target threadworkflow.Target) {
 	m.replyingThreadID = ""
 	m.pendingTarget = target
 	m.editor.Reset()
+	m.editor.Placeholder = "add review comment…"
 	m.composing = true
 	m.editor.Focus()
 }
@@ -792,9 +806,14 @@ func (m Model) renderThreadPreview(maxRows int) []string {
 	}
 	for i := start; i < len(positions) && remaining > 0; i++ {
 		p := positions[i]
-		loc := fmt.Sprintf("● %s:%d", compactPath(p.Thread.Path, sidebarWidth-8), p.Thread.LineStart)
+		replies := threadReplyCount(p.Thread)
+		replySuffix := ""
+		if replies > 0 {
+			replySuffix = fmt.Sprintf(" ↳%d", replies)
+		}
+		loc := fmt.Sprintf("● %s:%d%s", compactPath(p.Thread.Path, sidebarWidth-8-xansi.StringWidth(replySuffix)), p.Thread.LineStart, replySuffix)
 		if p.Thread.LineEnd != 0 && p.Thread.LineEnd != p.Thread.LineStart {
-			loc = fmt.Sprintf("● %s:%d-%d", compactPath(p.Thread.Path, sidebarWidth-10), p.Thread.LineStart, p.Thread.LineEnd)
+			loc = fmt.Sprintf("● %s:%d-%d%s", compactPath(p.Thread.Path, sidebarWidth-10-xansi.StringWidth(replySuffix)), p.Thread.LineStart, p.Thread.LineEnd, replySuffix)
 		}
 		bodyText := strings.ReplaceAll(thread.Body(p.Thread), "\n", " ")
 		if author := threadAuthor(p.Thread); author != "" {
@@ -983,6 +1002,7 @@ func (m Model) renderHelp() string {
 		"view",
 		"  s          split/unified",
 		"  b          show/hide sidebar",
+		"  i          inline threads",
 		"  x          syntax highlighting",
 		"  c          context dimming",
 		"  w          wrap cursor line",

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/owenps/tdiff/internal/diff"
@@ -33,6 +34,70 @@ func TestDiffPaneRendersThreadStartInRail(t *testing.T) {
 	out := xansi.Strip(m.renderDiff(4))
 	if !strings.Contains(out, "●") {
 		t.Fatalf("rendered diff missing thread start:\n%s", out)
+	}
+}
+
+func TestDiffPaneRendersThreadsInlineByDefault(t *testing.T) {
+	m := diffPaneTestModel(false)
+	m.width = 100
+	m.store.Threads[0].Messages = []thread.Message{
+		{Actor: thread.ActorHuman, Body: "should this timeout?"},
+		{Actor: thread.ActorAgent, Body: "fixed, added context timeout"},
+	}
+	m.session.SetStores(m.store, m.store)
+
+	out := xansi.Strip(m.renderDiff(8))
+	for _, want := range []string{"open · 1 reply", "you  should this timeout?", "agent  fixed, added context timeout"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("inline thread missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestDiffPaneHidesInlineThreads(t *testing.T) {
+	m := diffPaneTestModel(false)
+	m.width = 100
+	m.hideInlineThreads = true
+	m.store.Threads[0].Messages = []thread.Message{{Actor: thread.ActorHuman, Body: "hidden note"}}
+	m.session.SetStores(m.store, m.store)
+
+	out := xansi.Strip(m.renderDiff(8))
+	if strings.Contains(out, "hidden note") {
+		t.Fatalf("inline thread rendered while hidden:\n%s", out)
+	}
+}
+
+func TestInlineThreadKeybindToggles(t *testing.T) {
+	m := diffPaneTestModel(false)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	got := updated.(Model)
+	if !got.hideInlineThreads || got.status != "inline threads: false" {
+		t.Fatalf("i toggle = hideInlineThreads %t status %q", got.hideInlineThreads, got.status)
+	}
+}
+
+func TestDiffPaneInlineThreadDoesNotMoveCursor(t *testing.T) {
+	m := diffPaneTestModel(false)
+	m.session.MoveLine(1, 10)
+	_ = m.renderDiff(8)
+	if got := m.session.LineIndex(); got != 1 {
+		t.Fatalf("render moved cursor to %d, want 1", got)
+	}
+}
+
+func TestDiffPaneRendersSelectedThreadInlineInSplit(t *testing.T) {
+	m := diffPaneTestModel(true)
+	m.width = 100
+	m.store.Threads[0].Messages = []thread.Message{{Actor: thread.ActorHuman, Body: "split note"}}
+	m.session.SetStores(m.store, m.store)
+	m.session.MoveLine(1, 10)
+
+	out := xansi.Strip(m.renderDiff(8))
+	for _, want := range []string{"open", "you  split note"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("split inline thread missing %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -243,6 +308,38 @@ func TestLineNumberKeybindToggles(t *testing.T) {
 	}
 }
 
+func TestEditThreadRequiresLatestHumanMessage(t *testing.T) {
+	m := diffPaneTestModel(false)
+	m.store.Threads[0].Messages = []thread.Message{
+		{Actor: thread.ActorHuman, Body: "first"},
+		{Actor: thread.ActorAgent, Body: "agent reply"},
+	}
+	m.session.SetStores(m.store, m.store)
+	m.session.MoveLine(1, 10)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	got := updated.(Model)
+	if got.composing || got.status != "can only edit latest local message" {
+		t.Fatalf("edit = composing %t status %q", got.composing, got.status)
+	}
+}
+
+func TestEditThreadStartsWithLatestHumanMessage(t *testing.T) {
+	m := diffPaneTestModel(false)
+	m.store.Threads[0].Messages = []thread.Message{
+		{Actor: thread.ActorHuman, Body: "first"},
+		{Actor: thread.ActorHuman, Body: "latest"},
+	}
+	m.session.SetStores(m.store, m.store)
+	m.session.MoveLine(1, 10)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	got := updated.(Model)
+	if !got.composing || got.editor.Value() != "latest" || got.editor.Placeholder != "edit latest reply…" {
+		t.Fatalf("edit = composing %t editor %q placeholder %q", got.composing, got.editor.Value(), got.editor.Placeholder)
+	}
+}
+
 func TestReviewViewPadsToTerminalHeight(t *testing.T) {
 	m := diffPaneTestModel(false)
 	m.width = 80
@@ -251,6 +348,22 @@ func TestReviewViewPadsToTerminalHeight(t *testing.T) {
 	lines := strings.Split(m.View(), "\n")
 	if len(lines) != m.height {
 		t.Fatalf("view lines=%d, want %d", len(lines), m.height)
+	}
+}
+
+func TestComposerUsesBrandRail(t *testing.T) {
+	m := diffPaneTestModel(false)
+	m.width = 80
+	m.height = 20
+	m.composing = true
+	m.editor.SetValue("reply body")
+
+	out := xansi.Strip(m.View())
+	if !strings.Contains(out, "┃") || !strings.Contains(out, "reply body") {
+		t.Fatalf("composer missing rail:\n%s", out)
+	}
+	if got := m.editor.FocusedStyle.Prompt.GetForeground(); got != brandColor {
+		t.Fatalf("composer rail color = %v, want %v", got, brandColor)
 	}
 }
 
@@ -459,6 +572,10 @@ func TestDiffPaneKeepsSyntaxHighlightingOnAddDeleteLines(t *testing.T) {
 }
 
 func diffPaneTestModel(split bool) Model {
+	editor := textarea.New()
+	editor.ShowLineNumbers = false
+	editor.FocusedStyle.Prompt = threadStyle
+	editor.BlurredStyle.Prompt = threadStyle
 	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@", Lines: []diff.Line{
 		{Kind: diff.Delete, OldNo: 1, Text: "-old"},
 		{Kind: diff.Add, NewNo: 1, Text: "+new"},
@@ -471,6 +588,7 @@ func diffPaneTestModel(split bool) Model {
 		store:       store,
 		threads:     workflow,
 		session:     session,
+		editor:      editor,
 		width:       80,
 		split:       split,
 		syntax:      false,

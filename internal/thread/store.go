@@ -251,25 +251,24 @@ func (s *Store) Thread(id string) (Thread, bool) {
 	return Thread{}, false
 }
 
-func (s *Store) UpdateFirstMessage(id, body string) error {
+func (s *Store) UpdateLatestMessage(id, body string) error {
 	for i := range s.Threads {
 		if s.Threads[i].ID != id {
 			continue
 		}
+		if !CanEditLatestMessage(s.Threads[i]) {
+			return fmt.Errorf("can only edit latest local message")
+		}
 		now := time.Now()
-		if len(s.Threads[i].Messages) == 0 {
-			s.Threads[i].Messages = []Message{{ID: fmt.Sprintf("M%d", now.UnixNano()), Actor: ActorHuman, CreatedAt: now}}
-		}
-		s.Threads[i].Messages[0].Body = body
-		s.Threads[i].Messages[0].UpdatedAt = now
+		msgIdx := len(s.Threads[i].Messages) - 1
+		s.Threads[i].Messages[msgIdx].Body = body
+		s.Threads[i].Messages[msgIdx].UpdatedAt = now
 		s.Threads[i].UpdatedAt = now
-		if s.Threads[i].Messages[0].Actor == ActorHuman {
-			s.invalidateApprovalFor(s.Threads[i].DiffHash)
-		}
+		s.invalidateApprovalFor(s.Threads[i].DiffHash)
 		if err := s.Save(); err != nil {
 			return err
 		}
-		return s.appendEvent(Event{Type: "thread.edited", ThreadID: id, Actor: s.Threads[i].Messages[0].Actor, Body: body})
+		return s.appendEvent(Event{Type: "thread.edited", ThreadID: id, Actor: s.Threads[i].Messages[msgIdx].Actor, Body: body})
 	}
 	return fmt.Errorf("thread not found")
 }
@@ -414,6 +413,17 @@ func FirstMessage(t Thread) Message {
 }
 
 func Body(t Thread) string { return FirstMessage(t).Body }
+
+func LastMessage(t Thread) Message {
+	if len(t.Messages) == 0 {
+		return Message{}
+	}
+	return t.Messages[len(t.Messages)-1]
+}
+
+func CanEditLatestMessage(t Thread) bool {
+	return t.Source != SourceGitHub && len(t.Messages) > 0 && LastMessage(t).Actor == ActorHuman
+}
 
 func LastActor(t Thread) Actor {
 	if len(t.Messages) == 0 {

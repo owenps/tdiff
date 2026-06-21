@@ -47,3 +47,24 @@ func TestMatchesLineUsesSideAndNormalizedRange(t *testing.T) {
 		t.Fatal("expected new-side add line not to match old-side thread")
 	}
 }
+
+func TestCurrentInFilesNormalizesLegacyThreadRange(t *testing.T) {
+	files := []diff.File{{NewPath: "foo.go", Hunks: []diff.Hunk{{Lines: []diff.Line{{Kind: diff.Add, NewNo: 7}}}}}}
+	thread := thread.Thread{Path: "foo.go", Side: thread.SideNew, Line: 7}
+
+	if !CurrentInFiles(thread, files) {
+		t.Fatal("expected legacy single-line thread to be current")
+	}
+}
+
+func TestContextForRangeReturnsHunkContextOnSide(t *testing.T) {
+	files := []diff.File{{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@", Lines: []diff.Line{
+		{Kind: diff.Delete, OldNo: 1, Text: "-old"},
+		{Kind: diff.Add, NewNo: 1, Text: "+new"},
+	}}}}}
+
+	header, context, ok := ContextForRange(files, "foo.go", thread.SideOld, 1, 1)
+	if !ok || header != "@@ -1 +1 @@" || context != "-old" {
+		t.Fatalf("ContextForRange() = (%q, %q, %t)", header, context, ok)
+	}
+}

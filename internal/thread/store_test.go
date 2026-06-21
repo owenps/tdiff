@@ -68,6 +68,39 @@ func TestUnapproveClearsApproval(t *testing.T) {
 	}
 }
 
+func TestUpdateLatestMessageEditsOnlyLastHumanMessage(t *testing.T) {
+	store := tempStoreForStoreTest(t)
+	if err := store.Add(Thread{ID: "n1", Path: "a.go", Side: SideNew, Line: 1, DiffHash: "hash", Messages: []Message{{Actor: ActorHuman, Body: "first"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Reply("n1", Message{Actor: ActorHuman, Body: "latest"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateLatestMessage("n1", "edited"); err != nil {
+		t.Fatal(err)
+	}
+	got := store.Threads[0].Messages
+	if got[0].Body != "first" || got[1].Body != "edited" {
+		t.Fatalf("messages = %+v", got)
+	}
+}
+
+func TestUpdateLatestMessageRejectsLatestAgentMessage(t *testing.T) {
+	store := tempStoreForStoreTest(t)
+	if err := store.Add(Thread{ID: "n1", Path: "a.go", Side: SideNew, Line: 1, DiffHash: "hash", Messages: []Message{{Actor: ActorHuman, Body: "first"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Reply("n1", Message{Actor: ActorAgent, Body: "agent"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateLatestMessage("n1", "edited"); err == nil {
+		t.Fatal("expected latest local message error")
+	}
+	if got := store.Threads[0].Messages[1].Body; got != "agent" {
+		t.Fatalf("latest body = %q, want agent", got)
+	}
+}
+
 func tempStoreForStoreTest(t *testing.T) *Store {
 	t.Helper()
 	root := t.TempDir()

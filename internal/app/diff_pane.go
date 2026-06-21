@@ -16,6 +16,12 @@ import (
 	"github.com/owenps/tdiff/internal/threadtarget"
 )
 
+const (
+	inlineThreadMinScreenRows = 8
+	inlineThreadMinRows       = 4
+	inlineThreadMaxRows       = 8
+)
+
 type threadMarkers map[thread.Side]map[int]string
 
 func newThreadMarkers(threads []thread.Thread) threadMarkers {
@@ -56,19 +62,23 @@ func (m threadMarkers) markerForLine(line diff.Line) string {
 }
 
 type diffPane struct {
-	path            string
-	width           int
-	split           bool
-	syntax          bool
-	contextDim      bool
-	wrapCursorLine  bool
-	hideLineNumbers bool
-	syntaxCache     map[string]string
-	fullWidthHunks  map[string]bool
-	splitLayoutRows []splitRow
-	splitOffset     int
-	session         review.Session
-	markers         threadMarkers
+	path              string
+	width             int
+	split             bool
+	syntax            bool
+	contextDim        bool
+	wrapCursorLine    bool
+	hideLineNumbers   bool
+	syntaxCache       map[string]string
+	fullWidthHunks    map[string]bool
+	splitLayoutRows   []splitRow
+	splitOffset       int
+	session           review.Session
+	markers           threadMarkers
+	threads           []thread.Thread
+	inlineThreads     bool
+	selectedThread    thread.Thread
+	hasSelectedThread bool
 }
 
 func (m Model) renderDiff(height int) string {
@@ -95,20 +105,25 @@ func (m Model) diffPane(width int) diffPane {
 		fullWidthHunks = m.splitFullWidthHunks()
 		splitRows = m.splitNavForCurrentFile().rows
 	}
+	selectedThread, hasSelectedThread := m.selectedThread()
 	return diffPane{
-		path:            path,
-		width:           width,
-		split:           m.split,
-		syntax:          m.syntax,
-		contextDim:      m.contextDim,
-		wrapCursorLine:  m.wrapCursorLine,
-		hideLineNumbers: m.hideLineNumbers,
-		syntaxCache:     m.syntaxCache,
-		fullWidthHunks:  fullWidthHunks,
-		splitLayoutRows: splitRows,
-		splitOffset:     m.splitOffset,
-		session:         m.session,
-		markers:         newThreadMarkers(fileThreads),
+		path:              path,
+		width:             width,
+		split:             m.split,
+		syntax:            m.syntax,
+		contextDim:        m.contextDim,
+		wrapCursorLine:    m.wrapCursorLine,
+		hideLineNumbers:   m.hideLineNumbers,
+		syntaxCache:       m.syntaxCache,
+		fullWidthHunks:    fullWidthHunks,
+		splitLayoutRows:   splitRows,
+		splitOffset:       m.splitOffset,
+		session:           m.session,
+		markers:           newThreadMarkers(fileThreads),
+		threads:           fileThreads,
+		inlineThreads:     !m.hideInlineThreads,
+		selectedThread:    selectedThread,
+		hasSelectedThread: hasSelectedThread,
 	}
 }
 
@@ -285,24 +300,33 @@ func (p diffPane) Render(height int) string {
 		return p.renderSplit(height)
 	}
 	style := lipgloss.NewStyle().Width(p.width)
-	window := p.session.LineWindow(height)
-	lineCount := window.LineCount
-	lineIdx := window.LineIndex
-	start := window.Start
-	lines := window.Lines
+	lineCount := p.session.CurrentLineCount()
+	lineIdx := p.session.LineIndex()
+	cards := p.inlineThreadCards(height)
+	visualRows := lineVisualRows(lineCount, cards)
+	baseVisual := visualIndexForLine(visualRows, clamp(p.session.DiffOffset(), 0, max(0, lineCount-1)))
+	cursorVisual := visualIndexForLine(visualRows, lineIdx)
+	selectedCardEnd := p.selectedLineCardEnd(visualRows, cards)
+	start := inlineVisualStart(height, len(visualRows), baseVisual, cursorVisual, selectedCardEnd)
+	end := min(len(visualRows), start+height)
 	syntaxOK := p.syntaxAllowed(lineCount)
-	intraline := p.intralinePairs(max(0, window.Start-intralineContextLines), min(lineCount, window.End+intralineContextLines))
+	minLine, maxLine := visibleLineRange(visualRows[start:end])
+	intraline := p.intralinePairs(max(0, minLine-intralineContextLines), min(lineCount, maxLine+1+intralineContextLines))
 
 	var rows []string
-	for offset, dl := range lines {
+	for _, vr := range visualRows[start:end] {
 		if len(rows) >= height {
 			break
 		}
-		i := start + offset
-		selected := i == lineIdx
-		inRange := p.inActiveRange(i)
-		rangeGlyph := p.rangeGlyph(i)
-		line := p.formatLine(dl, selected, inRange, rangeGlyph, syntaxOK, intraline[i])
+		if vr.card {
+			rows = append(rows, vr.text)
+			continue
+		}
+		dl := p.session.DisplayLineAt(vr.lineIdx)
+		selected := vr.lineIdx == lineIdx
+		inRange := p.inActiveRange(vr.lineIdx)
+		rangeGlyph := p.rangeGlyph(vr.lineIdx)
+		line := p.formatLine(dl, selected, inRange, rangeGlyph, syntaxOK, intraline[vr.lineIdx])
 		if !selected {
 			if inRange {
 				line = padRightStyled(line, p.width, rangeStyle)
@@ -334,16 +358,26 @@ func (p diffPane) renderSplit(height int) string {
 	if rows == nil {
 		rows = p.splitRows(p.session.CurrentLines(), 0)
 	}
-	start := clamp(p.splitOffset, 0, max(0, len(rows)-height))
-	end := min(len(rows), start+height)
-	rows = rows[start:end]
+	lineIdx := p.session.LineIndex()
+	selectedRow := splitRowIndexForLine(rows, lineIdx)
+	cards := splitThreadCards(p.inlineThreadCards(height), rows)
+	visualRows := splitVisualRows(len(rows), cards)
+	baseVisual := visualIndexForSplitRow(visualRows, clamp(p.splitOffset, 0, max(0, len(rows)-1)))
+	cursorVisual := visualIndexForSplitRow(visualRows, selectedRow)
+	selectedCardEnd := p.selectedSplitCardEnd(visualRows, cards, rows)
+	start := inlineVisualStart(height, len(visualRows), baseVisual, cursorVisual, selectedCardEnd)
+	end := min(len(visualRows), start+height)
 
 	var out []string
-	lineIdx := p.session.LineIndex()
-	for _, row := range rows {
+	for _, vr := range visualRows[start:end] {
 		if len(out) >= height {
 			break
 		}
+		if vr.card {
+			out = append(out, vr.text)
+			continue
+		}
+		row := rows[vr.rowIdx]
 		line := p.formatSplitRow(row, syntaxOK)
 		selected := row.oldIdx == lineIdx || row.newIdx == lineIdx
 		inRange := (row.oldIdx >= 0 && p.inActiveRange(row.oldIdx)) || (row.newIdx >= 0 && p.inActiveRange(row.newIdx))
@@ -367,6 +401,280 @@ func appendRenderedRows(rows []string, rendered string, maxRows int) []string {
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+type lineVisualRow struct {
+	lineIdx int
+	card    bool
+	text    string
+}
+
+type splitVisualRow struct {
+	rowIdx int
+	card   bool
+	text   string
+}
+
+func (p diffPane) inlineThreadCards(height int) map[int][]string {
+	if !p.inlineThreads || height < inlineThreadMinScreenRows || p.width < 24 {
+		return nil
+	}
+	maxRows := min(inlineThreadMaxRows, max(inlineThreadMinRows, height/4))
+	maxRows = min(maxRows, max(0, height-1))
+	cards := make(map[int][]string)
+	for _, t := range p.threads {
+		anchor := p.threadAnchorIndex(t)
+		if anchor < 0 {
+			continue
+		}
+		rows := p.threadCardRows(t, maxRows)
+		if len(rows) > 0 {
+			cards[anchor] = append(cards[anchor], rows...)
+		}
+	}
+	return cards
+}
+
+func lineVisualRows(lineCount int, cards map[int][]string) []lineVisualRow {
+	rows := make([]lineVisualRow, 0, lineCount+len(cards)*inlineThreadMinRows)
+	for i := 0; i < lineCount; i++ {
+		rows = append(rows, lineVisualRow{lineIdx: i})
+		for _, card := range cards[i] {
+			rows = append(rows, lineVisualRow{card: true, text: card})
+		}
+	}
+	return rows
+}
+
+func splitVisualRows(rowCount int, cards map[int][]string) []splitVisualRow {
+	rows := make([]splitVisualRow, 0, rowCount+len(cards)*inlineThreadMinRows)
+	for i := 0; i < rowCount; i++ {
+		rows = append(rows, splitVisualRow{rowIdx: i})
+		for _, card := range cards[i] {
+			rows = append(rows, splitVisualRow{card: true, text: card})
+		}
+	}
+	return rows
+}
+
+func splitThreadCards(lineCards map[int][]string, rows []splitRow) map[int][]string {
+	if len(lineCards) == 0 {
+		return nil
+	}
+	cards := make(map[int][]string)
+	for lineIdx, cardRows := range lineCards {
+		rowIdx := splitRowIndexForLine(rows, lineIdx)
+		if rowIdx >= 0 {
+			cards[rowIdx] = append(cards[rowIdx], cardRows...)
+		}
+	}
+	return cards
+}
+
+func inlineVisualStart(height, rowCount, baseVisual, cursorVisual, selectedCardEnd int) int {
+	start := clamp(baseVisual, 0, max(0, rowCount-height))
+	if height <= 0 || rowCount == 0 {
+		return 0
+	}
+	if cursorVisual >= 0 {
+		if cursorVisual < start {
+			start = cursorVisual
+		}
+		if cursorVisual >= start+height {
+			start = cursorVisual - height + 1
+		}
+	}
+	if selectedCardEnd >= 0 && selectedCardEnd >= start+height {
+		candidate := selectedCardEnd - height + 1
+		if cursorVisual < 0 || candidate <= cursorVisual {
+			start = candidate
+		}
+	}
+	return clamp(start, 0, max(0, rowCount-height))
+}
+
+func visualIndexForLine(rows []lineVisualRow, lineIdx int) int {
+	for i, row := range rows {
+		if !row.card && row.lineIdx == lineIdx {
+			return i
+		}
+	}
+	return 0
+}
+
+func visualIndexForSplitRow(rows []splitVisualRow, rowIdx int) int {
+	for i, row := range rows {
+		if !row.card && row.rowIdx == rowIdx {
+			return i
+		}
+	}
+	return 0
+}
+
+func visibleLineRange(rows []lineVisualRow) (int, int) {
+	minLine, maxLine := 0, 0
+	found := false
+	for _, row := range rows {
+		if row.card {
+			continue
+		}
+		if !found || row.lineIdx < minLine {
+			minLine = row.lineIdx
+		}
+		if !found || row.lineIdx > maxLine {
+			maxLine = row.lineIdx
+		}
+		found = true
+	}
+	return minLine, maxLine
+}
+
+func (p diffPane) selectedLineCardEnd(rows []lineVisualRow, cards map[int][]string) int {
+	if !p.hasSelectedThread {
+		return -1
+	}
+	anchor := p.threadAnchorIndex(p.selectedThread)
+	cardRows := cards[anchor]
+	if len(cardRows) == 0 {
+		return -1
+	}
+	return visualIndexForLine(rows, anchor) + len(cardRows)
+}
+
+func (p diffPane) selectedSplitCardEnd(rows []splitVisualRow, cards map[int][]string, splitRows []splitRow) int {
+	if !p.hasSelectedThread {
+		return -1
+	}
+	anchor := splitRowIndexForLine(splitRows, p.threadAnchorIndex(p.selectedThread))
+	cardRows := cards[anchor]
+	if anchor < 0 || len(cardRows) == 0 {
+		return -1
+	}
+	return visualIndexForSplitRow(rows, anchor) + len(cardRows)
+}
+
+func splitRowIndexForLine(rows []splitRow, lineIdx int) int {
+	if lineIdx < 0 {
+		return -1
+	}
+	for i, row := range rows {
+		if row.oldIdx == lineIdx || row.newIdx == lineIdx {
+			return i
+		}
+	}
+	return -1
+}
+
+func (p diffPane) threadAnchorIndex(t thread.Thread) int {
+	anchor := -1
+	for i, dl := range p.session.CurrentLines() {
+		if dl.Line != nil && threadtarget.MatchesLine(t, *dl.Line) {
+			anchor = i
+		}
+	}
+	return anchor
+}
+
+func (p diffPane) threadCardRows(t thread.Thread, maxRows int) []string {
+	if maxRows < 3 || p.width < 10 {
+		return nil
+	}
+	cardW := max(10, p.width-2)
+	bodyRows := maxRows - 2
+	rows := []string{threadStyle.Render(p.threadCardBorder("╭", p.threadCardTitle(t), "╮", cardW))}
+	messages := inlineThreadMessages(t.Messages, bodyRows)
+	for _, msg := range messages {
+		rows = append(rows, dimStyle.Render(p.threadCardBody(msg, cardW)))
+	}
+	rows = append(rows, threadStyle.Render(p.threadCardBorder("╰", "", "╯", cardW)))
+	return rows
+}
+
+func (p diffPane) threadCardTitle(t thread.Thread) string {
+	status := string(t.Status)
+	if status == "" {
+		status = string(thread.StatusOpen)
+	}
+	replies := len(t.Messages) - 1
+	if replies < 0 {
+		replies = 0
+	}
+	if replies == 0 {
+		return status
+	}
+	return status + " · " + threadReplyLabel(replies)
+}
+
+func threadReplyCount(t thread.Thread) int {
+	return max(0, len(t.Messages)-1)
+}
+
+func threadReplyLabel(count int) string {
+	if count == 1 {
+		return "1 reply"
+	}
+	return fmt.Sprintf("%d replies", count)
+}
+
+func (p diffPane) threadCardBorder(left, text, right string, width int) string {
+	innerW := max(0, width-2)
+	if text == "" {
+		return "  " + left + strings.Repeat("─", innerW) + right
+	}
+	label := "─ " + text + " "
+	if xansi.StringWidth(label) > innerW {
+		label = truncate(label, innerW)
+	}
+	return "  " + left + label + strings.Repeat("─", max(0, innerW-xansi.StringWidth(label))) + right
+}
+
+func (p diffPane) threadCardBody(text string, width int) string {
+	innerW := max(0, width-4)
+	body := truncate(text, innerW)
+	return "  │ " + body + strings.Repeat(" ", max(0, innerW-xansi.StringWidth(body))) + " │"
+}
+
+func inlineThreadMessages(messages []thread.Message, maxRows int) []string {
+	if maxRows <= 0 {
+		return nil
+	}
+	if len(messages) == 0 {
+		return []string{"no messages"}
+	}
+	start := 0
+	out := make([]string, 0, maxRows)
+	if len(messages) > maxRows {
+		start = len(messages) - maxRows + 1
+		out = append(out, fmt.Sprintf("… %d older", start))
+	}
+	for _, msg := range messages[start:] {
+		out = append(out, inlineThreadMessageText(msg))
+	}
+	return out
+}
+
+func inlineThreadMessageText(msg thread.Message) string {
+	body := strings.ReplaceAll(strings.TrimSpace(msg.Body), "\n", " ")
+	if author := inlineThreadMessageAuthor(msg); author != "" {
+		return author + "  " + body
+	}
+	return body
+}
+
+func inlineThreadMessageAuthor(msg thread.Message) string {
+	if msg.AuthorName != "" {
+		return msg.AuthorName
+	}
+	if msg.AuthorLogin != "" {
+		return msg.AuthorLogin
+	}
+	if msg.Actor == thread.ActorHuman {
+		return "you"
+	}
+	if msg.Actor != "" {
+		return string(msg.Actor)
+	}
+	return ""
 }
 
 func (p diffPane) intralinePairs(start, end int) map[int]string {

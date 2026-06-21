@@ -47,7 +47,7 @@ func TestDiffPaneRendersThreadsInlineByDefault(t *testing.T) {
 	m.session.SetStores(m.store, m.store)
 
 	out := xansi.Strip(m.renderDiff(8))
-	for _, want := range []string{"open · 1 reply", "you  should this timeout?", "agent  fixed, added context timeout"} {
+	for _, want := range []string{"1 reply", "you  should this timeout?", "agent  fixed, added context timeout"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("inline thread missing %q:\n%s", want, out)
 		}
@@ -94,7 +94,7 @@ func TestDiffPaneRendersSelectedThreadInlineInSplit(t *testing.T) {
 	m.session.MoveLine(1, 10)
 
 	out := xansi.Strip(m.renderDiff(8))
-	for _, want := range []string{"open", "you  split note"} {
+	for _, want := range []string{"you  split note"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("split inline thread missing %q:\n%s", want, out)
 		}

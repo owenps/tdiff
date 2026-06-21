@@ -591,18 +591,11 @@ func (p diffPane) threadCardRows(t thread.Thread, maxRows int) []string {
 }
 
 func (p diffPane) threadCardTitle(t thread.Thread) string {
-	status := string(t.Status)
-	if status == "" {
-		status = string(thread.StatusOpen)
-	}
-	replies := len(t.Messages) - 1
-	if replies < 0 {
-		replies = 0
-	}
+	replies := threadReplyCount(t)
 	if replies == 0 {
-		return status
+		return ""
 	}
-	return status + " · " + threadReplyLabel(replies)
+	return threadReplyLabel(replies)
 }
 
 func threadReplyCount(t thread.Thread) int {

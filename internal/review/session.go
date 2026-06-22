@@ -133,11 +133,12 @@ func (s *Session) applyFilters() {
 func (s Session) AllFiles() []diff.File { return s.allFiles }
 func (s Session) DiffHash() string      { return s.diffHash }
 
-func (s Session) Files() []diff.File { return s.cursor.Files() }
-func (s Session) FileIndex() int     { return s.cursor.FileIndex() }
-func (s Session) LineIndex() int     { return s.cursor.LineIndex() }
-func (s Session) DiffOffset() int    { return s.cursor.DiffOffset() }
-func (s Session) RangeActive() bool  { return s.cursor.RangeActive() }
+func (s Session) Files() []diff.File     { return s.cursor.Files() }
+func (s Session) FileIndex() int         { return s.cursor.FileIndex() }
+func (s Session) LineIndex() int         { return s.cursor.LineIndex() }
+func (s Session) DiffOffset() int        { return s.cursor.DiffOffset() }
+func (s Session) RangeActive() bool      { return s.cursor.RangeActive() }
+func (s Session) RangeSide() thread.Side { return s.cursor.RangeSide() }
 
 func (s Session) CurrentLines() []DisplayLine { return s.cursor.CurrentLines() }
 func (s Session) CurrentLineCount() int       { return s.cursor.CurrentLineCount() }
@@ -189,6 +190,9 @@ func (s *Session) JumpToFileLine(line, height int) bool {
 }
 func (s *Session) JumpToIndex(fileIdx, lineIdx, height int) bool {
 	return s.cursor.JumpToIndex(fileIdx, lineIdx, height)
+}
+func (s *Session) JumpToLine(lineIdx, height int) bool {
+	return s.cursor.JumpToLine(lineIdx, height)
 }
 func (s *Session) EnsureVisible(height int) { s.cursor.EnsureVisible(height) }
 func (s *Session) StartRange() bool         { return s.cursor.StartRange() }

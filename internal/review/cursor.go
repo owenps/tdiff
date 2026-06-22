@@ -20,6 +20,7 @@ type Cursor struct {
 	diffOffset    int
 	rangeActive   bool
 	rangeStartIdx int
+	rangeSide     thread.Side
 }
 
 func NewCursor(files []diff.File) Cursor {
@@ -37,6 +38,7 @@ func (c *Cursor) SetFiles(files []diff.File) {
 	c.lineIdx = 0
 	c.diffOffset = 0
 	c.rangeActive = false
+	c.rangeSide = ""
 }
 
 type FileFilter struct {
@@ -71,11 +73,12 @@ func FilterFiles(files []diff.File, filter FileFilter) []diff.File {
 	return filtered
 }
 
-func (c Cursor) Files() []diff.File { return c.files }
-func (c Cursor) FileIndex() int     { return c.fileIdx }
-func (c Cursor) LineIndex() int     { return c.lineIdx }
-func (c Cursor) DiffOffset() int    { return c.diffOffset }
-func (c Cursor) RangeActive() bool  { return c.rangeActive }
+func (c Cursor) Files() []diff.File     { return c.files }
+func (c Cursor) FileIndex() int         { return c.fileIdx }
+func (c Cursor) LineIndex() int         { return c.lineIdx }
+func (c Cursor) DiffOffset() int        { return c.diffOffset }
+func (c Cursor) RangeActive() bool      { return c.rangeActive }
+func (c Cursor) RangeSide() thread.Side { return c.rangeSide }
 
 func (c Cursor) CurrentLines() []DisplayLine {
 	return c.currentDisplayLines()
@@ -124,6 +127,7 @@ func (c *Cursor) MoveFile(delta int) {
 	c.lineIdx = 0
 	c.diffOffset = 0
 	c.rangeActive = false
+	c.rangeSide = ""
 }
 
 func (c *Cursor) JumpTop() {
@@ -178,6 +182,16 @@ func (c *Cursor) JumpToIndex(fileIdx, lineIdx, height int) bool {
 	c.lineIdx = clamp(lineIdx, 0, max(0, c.CurrentLineCount()-1))
 	c.diffOffset = 0
 	c.rangeActive = false
+	c.rangeSide = ""
+	c.EnsureVisible(height)
+	return true
+}
+
+func (c *Cursor) JumpToLine(lineIdx, height int) bool {
+	if len(c.files) == 0 {
+		return false
+	}
+	c.lineIdx = clamp(lineIdx, 0, max(0, c.CurrentLineCount()-1))
 	c.EnsureVisible(height)
 	return true
 }
@@ -201,13 +215,19 @@ func (c *Cursor) StartRange() bool {
 	if c.SelectedLine().Line == nil {
 		return false
 	}
+	side, _, ok := threadtarget.ForLine(*c.SelectedLine().Line)
+	if !ok {
+		return false
+	}
 	c.rangeActive = true
 	c.rangeStartIdx = c.lineIdx
+	c.rangeSide = side
 	return true
 }
 
 func (c *Cursor) CancelRange() {
 	c.rangeActive = false
+	c.rangeSide = ""
 }
 
 func (c Cursor) InActiveRange(idx int) bool {

@@ -205,12 +205,21 @@ func (m *Model) moveLine(delta int) {
 		m.session.MoveLine(delta, m.bodyHeight())
 		return
 	}
-	targetRow := clamp(rowIdx+delta, 0, len(nav.rows)-1)
-	targetLine := splitNavRowTargetLine(nav.rows[targetRow], delta)
+	targetLine := -1
+	if m.session.RangeActive() {
+		targetLine = splitNavLineForSide(nav.rows, rowIdx, delta, m.session.RangeSide())
+	} else {
+		targetRow := clamp(rowIdx+delta, 0, len(nav.rows)-1)
+		targetLine = splitNavRowTargetLine(nav.rows[targetRow], delta)
+	}
 	if targetLine < 0 || targetLine == current {
 		return
 	}
-	m.session.JumpToIndex(m.session.FileIndex(), targetLine, m.bodyHeight())
+	if m.session.RangeActive() {
+		m.session.JumpToLine(targetLine, m.bodyHeight())
+	} else {
+		m.session.JumpToIndex(m.session.FileIndex(), targetLine, m.bodyHeight())
+	}
 	m.ensureSplitCursorVisible(m.bodyHeight())
 }
 
@@ -298,6 +307,28 @@ func splitNavRowTargetLine(row splitRow, delta int) int {
 		return row.oldIdx
 	}
 	return row.newIdx
+}
+
+func splitNavLineForSide(rows []splitRow, rowIdx, delta int, side thread.Side) int {
+	if delta == 0 {
+		return -1
+	}
+	for i := rowIdx + delta; i >= 0 && i < len(rows); i += delta {
+		if line := splitRowLineForSide(rows[i], side); line >= 0 {
+			return line
+		}
+	}
+	return -1
+}
+
+func splitRowLineForSide(row splitRow, side thread.Side) int {
+	if side == thread.SideOld {
+		return row.oldIdx
+	}
+	if side == thread.SideNew {
+		return row.newIdx
+	}
+	return -1
 }
 
 func (p diffPane) Render(height int) string {
@@ -957,10 +988,13 @@ func (p diffPane) formatSplitRow(row splitRow, syntaxOK bool) string {
 		}
 		return hunkStyle.Render(text)
 	}
-	selected := row.oldIdx == p.session.LineIndex() || row.newIdx == p.session.LineIndex()
-	inRange := (row.oldIdx >= 0 && p.inActiveRange(row.oldIdx)) || (row.newIdx >= 0 && p.inActiveRange(row.newIdx))
+	oldSelected, newSelected, oldInRange, newInRange := p.splitRowSideState(row)
+	selected := oldSelected || newSelected
+	inRange := oldInRange || newInRange
 	glyphIdx := row.oldIdx
-	if glyphIdx < 0 {
+	if p.session.RangeActive() {
+		glyphIdx = splitRowLineForSide(row, p.session.RangeSide())
+	} else if glyphIdx < 0 {
 		glyphIdx = row.newIdx
 	}
 	if selected {
@@ -983,19 +1017,34 @@ func (p diffPane) formatSplitRow(row splitRow, syntaxOK bool) string {
 	if !p.hideLineNumbers {
 		oldNo, oldKind := splitLineNoAndKind(row.old.Line, thread.SideOld)
 		newNo, newKind := splitLineNoAndKind(row.new.Line, thread.SideNew)
-		oldPrefix = p.lineNoView(oldNo, oldKind, selected, inRange) + gutterView(" ", selected, inRange)
-		newPrefix = p.lineNoView(newNo, newKind, selected, inRange) + gutterView(" ", selected, inRange)
+		oldPrefix = p.lineNoView(oldNo, oldKind, oldSelected, oldInRange) + gutterView(" ", oldSelected, oldInRange)
+		newPrefix = p.lineNoView(newNo, newKind, newSelected, newInRange) + gutterView(" ", newSelected, newInRange)
 	}
 	if selected && p.wrapCursorLine && p.splitRowNeedsWrap(row, leftW, rightW, syntaxOK) {
-		return p.formatWrappedSplitRow(row, marker, rangeGlyph, inRange, oldPrefix, newPrefix, leftW, rightW, syntaxOK)
+		return p.formatWrappedSplitRow(row, marker, rangeGlyph, selected, inRange, oldSelected, newSelected, oldInRange, newInRange, oldPrefix, newPrefix, leftW, rightW, syntaxOK)
 	}
-	rest := oldPrefix + p.splitCellText(row.old.Line, thread.SideOld, leftW, selected, inRange, syntaxOK, row.oldAgainst) + gutterView(" │ ", selected, inRange) + newPrefix + p.splitCellText(row.new.Line, thread.SideNew, rightW, selected, inRange, syntaxOK, row.newAgainst)
+	rest := oldPrefix + p.splitCellText(row.old.Line, thread.SideOld, leftW, oldSelected, oldInRange, syntaxOK, row.oldAgainst) + gutterView(" │ ", selected, inRange) + newPrefix + p.splitCellText(row.new.Line, thread.SideNew, rightW, newSelected, newInRange, syntaxOK, row.newAgainst)
 	line := prefix + rest
 	if selected {
 		line = railCell(railGlyph(marker, rangeGlyph), true, inRange) + selectedStyle.Render(" ") + rest
 		return padRightStyled(truncate(line, p.width), p.width, selectedStyle)
 	}
 	return truncate(line, p.width)
+}
+
+func (p diffPane) splitRowSideState(row splitRow) (oldSelected, newSelected, oldInRange, newInRange bool) {
+	current := p.session.LineIndex()
+	if p.session.RangeActive() {
+		side := p.session.RangeSide()
+		oldSelected = side == thread.SideOld && row.oldIdx == current
+		newSelected = side == thread.SideNew && row.newIdx == current
+		oldInRange = side == thread.SideOld && row.oldIdx >= 0 && p.inActiveRange(row.oldIdx)
+		newInRange = side == thread.SideNew && row.newIdx >= 0 && p.inActiveRange(row.newIdx)
+		return oldSelected, newSelected, oldInRange, newInRange
+	}
+	oldSelected = row.oldIdx == current
+	newSelected = row.newIdx == current
+	return oldSelected, newSelected, false, false
 }
 
 func (p diffPane) formatFullWidthSplitRow(row splitRow, prefix, marker, rangeGlyph string, selected, inRange, syntaxOK bool) string {
@@ -1049,9 +1098,9 @@ func (p diffPane) splitLineNeedsWrap(line *diff.Line, side thread.Side, width in
 	return xansi.StringWidth(body) > bodyW
 }
 
-func (p diffPane) formatWrappedSplitRow(row splitRow, marker, rangeGlyph string, inRange bool, oldPrefix, newPrefix string, leftW, rightW int, syntaxOK bool) string {
-	leftRows := p.splitCellTextRows(row.old.Line, thread.SideOld, leftW, true, inRange, syntaxOK, row.oldAgainst)
-	rightRows := p.splitCellTextRows(row.new.Line, thread.SideNew, rightW, true, inRange, syntaxOK, row.newAgainst)
+func (p diffPane) formatWrappedSplitRow(row splitRow, marker, rangeGlyph string, selected, inRange, oldSelected, newSelected, oldInRange, newInRange bool, oldPrefix, newPrefix string, leftW, rightW int, syntaxOK bool) string {
+	leftRows := p.splitCellTextRows(row.old.Line, thread.SideOld, leftW, oldSelected, oldInRange, syntaxOK, row.oldAgainst)
+	rightRows := p.splitCellTextRows(row.new.Line, thread.SideNew, rightW, newSelected, newInRange, syntaxOK, row.newAgainst)
 	rowCount := max(len(leftRows), len(rightRows))
 	if rowCount == 0 {
 		return ""
@@ -1074,7 +1123,7 @@ func (p diffPane) formatWrappedSplitRow(row splitRow, marker, rangeGlyph string,
 		if i < len(rightRows) {
 			right = rightRows[i]
 		}
-		line := linePrefix + leftNo + left + gutterView(" │ ", true, inRange) + newNo + right
+		line := linePrefix + leftNo + left + gutterView(" │ ", selected, inRange) + newNo + right
 		rows = append(rows, padRightStyled(truncate(line, p.width), p.width, selectedStyle))
 	}
 	return strings.Join(rows, "\n")

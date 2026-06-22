@@ -339,6 +339,87 @@ func TestSplitNavigationMovesByVisualRows(t *testing.T) {
 	}
 }
 
+func TestSplitRangeRenderingMarksOnlyRangeSide(t *testing.T) {
+	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1,3 +1,3 @@", Lines: []diff.Line{
+		{Kind: diff.Context, OldNo: 1, NewNo: 1, Text: " before"},
+		{Kind: diff.Delete, OldNo: 2, Text: "-old"},
+		{Kind: diff.Add, NewNo: 2, Text: "+new"},
+		{Kind: diff.Context, OldNo: 3, NewNo: 3, Text: " after"},
+	}}}}
+	store := &thread.Store{}
+	m := Model{store: store, threads: threadworkflow.NewWorkflow(store), session: review.NewSession([]diff.File{file}), width: 80, height: 12, split: true, syntax: false, syntaxCache: make(map[string]string)}
+	m.session.JumpToIndex(0, 2, m.bodyHeight())
+	if result := m.session.ToggleRange(); !result.Started {
+		t.Fatalf("range toggle=%+v", result)
+	}
+	m.moveLine(1)
+
+	rows := m.splitNavForCurrentFile().rows
+	pane := m.diffPane(m.diffWidth())
+	_, replacementNewSelected, replacementOldRange, replacementNewRange := pane.splitRowSideState(rows[2])
+	if !replacementOldRange || replacementNewRange || replacementNewSelected {
+		t.Fatalf("replacement side state oldRange=%t newRange=%t newSelected=%t", replacementOldRange, replacementNewRange, replacementNewSelected)
+	}
+	contextOldSelected, contextNewSelected, contextOldRange, contextNewRange := pane.splitRowSideState(rows[3])
+	if !contextOldSelected || contextNewSelected || !contextOldRange || contextNewRange {
+		t.Fatalf("context side state oldSelected=%t newSelected=%t oldRange=%t newRange=%t", contextOldSelected, contextNewSelected, contextOldRange, contextNewRange)
+	}
+}
+
+func TestSplitRangeNavigationStaysOnStartSide(t *testing.T) {
+	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1,3 +1,3 @@", Lines: []diff.Line{
+		{Kind: diff.Context, OldNo: 1, NewNo: 1, Text: " before"},
+		{Kind: diff.Delete, OldNo: 2, Text: "-old"},
+		{Kind: diff.Add, NewNo: 2, Text: "+new"},
+		{Kind: diff.Context, OldNo: 3, NewNo: 3, Text: " after"},
+	}}}}
+	store := &thread.Store{}
+	m := Model{store: store, threads: threadworkflow.NewWorkflow(store), session: review.NewSession([]diff.File{file}), width: 80, height: 12, split: true, syntax: false, syntaxCache: make(map[string]string)}
+	m.session.JumpToIndex(0, 2, m.bodyHeight())
+	if result := m.session.ToggleRange(); !result.Started {
+		t.Fatalf("range toggle=%+v", result)
+	}
+
+	m.moveLine(1)
+	if got := m.session.LineIndex(); got != 4 {
+		t.Fatalf("split range j moved to line %d, want old-side context line 4", got)
+	}
+	target, err := m.rangeTarget()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Side != thread.SideOld || target.LineStart != 2 || target.LineEnd != 3 {
+		t.Fatalf("target=%+v", target)
+	}
+}
+
+func TestSplitRangeNavigationFromNewSideSkipsOldCounterpart(t *testing.T) {
+	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1,3 +1,3 @@", Lines: []diff.Line{
+		{Kind: diff.Context, OldNo: 1, NewNo: 1, Text: " before"},
+		{Kind: diff.Delete, OldNo: 2, Text: "-old"},
+		{Kind: diff.Add, NewNo: 2, Text: "+new"},
+		{Kind: diff.Context, OldNo: 3, NewNo: 3, Text: " after"},
+	}}}}
+	store := &thread.Store{}
+	m := Model{store: store, threads: threadworkflow.NewWorkflow(store), session: review.NewSession([]diff.File{file}), width: 80, height: 12, split: true, syntax: false, syntaxCache: make(map[string]string)}
+	m.session.JumpToIndex(0, 3, m.bodyHeight())
+	if result := m.session.ToggleRange(); !result.Started {
+		t.Fatalf("range toggle=%+v", result)
+	}
+
+	m.moveLine(-1)
+	if got := m.session.LineIndex(); got != 1 {
+		t.Fatalf("split range k moved to line %d, want new-side context line 1", got)
+	}
+	target, err := m.rangeTarget()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Side != thread.SideNew || target.LineStart != 1 || target.LineEnd != 2 {
+		t.Fatalf("target=%+v", target)
+	}
+}
+
 func TestDiffPaneHidesUnifiedLineNumbers(t *testing.T) {
 	m := diffPaneTestModel(false)
 	m.hideLineNumbers = true

@@ -390,7 +390,39 @@ func (m Model) singleLineTarget() (threadworkflow.Target, error) {
 }
 
 func (m Model) rangeTarget() (threadworkflow.Target, error) {
+	if m.split {
+		return m.threads.TargetForDisplayRangeSide(m.splitRangeLines(), m.session.RangeSide())
+	}
 	return m.threads.TargetForDisplayRange(m.session.RangeLines())
+}
+
+func (m Model) splitRangeLines() []review.DisplayLine {
+	if !m.session.RangeActive() {
+		return nil
+	}
+	side := m.session.RangeSide()
+	if side == "" {
+		return m.session.RangeLines()
+	}
+	lines := m.session.CurrentLines()
+	rows := m.splitNavForCurrentFile().rows
+	start, end := m.session.RangeIndexes()
+	startRow := splitRowIndexForLine(rows, start)
+	endRow := splitRowIndexForLine(rows, end)
+	if startRow < 0 || endRow < 0 {
+		return nil
+	}
+	if startRow > endRow {
+		startRow, endRow = endRow, startRow
+	}
+	out := make([]review.DisplayLine, 0, endRow-startRow+1)
+	for i := startRow; i <= endRow && i < len(rows); i++ {
+		idx := splitRowLineForSide(rows[i], side)
+		if idx >= 0 && idx < len(lines) {
+			out = append(out, lines[idx])
+		}
+	}
+	return out
 }
 
 func (m Model) currentPath() string {

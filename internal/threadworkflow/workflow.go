@@ -64,6 +64,17 @@ func (w Workflow) TargetForDisplayRange(lines []review.DisplayLine) (Target, err
 	return w.TargetForRange(selected)
 }
 
+func (w Workflow) TargetForDisplayRangeSide(lines []review.DisplayLine, side thread.Side) (Target, error) {
+	selected := make([]DiffLine, 0, len(lines))
+	for _, dl := range lines {
+		if dl.Line == nil {
+			continue
+		}
+		selected = append(selected, DiffLine{Line: *dl.Line, HunkHeader: dl.HunkHeader})
+	}
+	return w.TargetForRangeSide(selected, side)
+}
+
 func (w Workflow) TargetForRange(lines []DiffLine) (Target, error) {
 	var target Target
 	var context []string
@@ -79,6 +90,35 @@ func (w Workflow) TargetForRange(lines []DiffLine) (Target, error) {
 			target.HunkHeader = dl.HunkHeader
 		} else if target.Side != side {
 			return Target{}, fmt.Errorf("mixed old/new range unsupported")
+		} else {
+			target.LineStart = min(target.LineStart, line)
+			target.LineEnd = max(target.LineEnd, line)
+		}
+		context = append(context, dl.Line.Text)
+	}
+	if target.LineStart == 0 {
+		return Target{}, fmt.Errorf("range has no diff lines")
+	}
+	target.Context = strings.Join(context, "\n")
+	return target, nil
+}
+
+func (w Workflow) TargetForRangeSide(lines []DiffLine, side thread.Side) (Target, error) {
+	if side == "" {
+		return w.TargetForRange(lines)
+	}
+	var target Target
+	var context []string
+	for _, dl := range lines {
+		line := threadtarget.LineNumber(dl.Line, side)
+		if line == 0 {
+			continue
+		}
+		if target.LineStart == 0 {
+			target.Side = side
+			target.LineStart = line
+			target.LineEnd = line
+			target.HunkHeader = dl.HunkHeader
 		} else {
 			target.LineStart = min(target.LineStart, line)
 			target.LineEnd = max(target.LineEnd, line)

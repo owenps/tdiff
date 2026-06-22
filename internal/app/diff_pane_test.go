@@ -29,11 +29,26 @@ func TestDiffPaneRendersUnifiedThreadAndRange(t *testing.T) {
 	}
 }
 
-func TestDiffPaneRendersThreadStartInRail(t *testing.T) {
+func TestDiffPaneRendersUnreadThreadStartInRail(t *testing.T) {
 	m := diffPaneTestModel(false)
+	m.store.Threads[0].Messages = []thread.Message{{ID: "m1", Actor: thread.ActorAgent, Body: "fixed"}}
+	m.session.SetStores(m.store, m.store)
+
 	out := xansi.Strip(m.renderDiff(4))
 	if !strings.Contains(out, "●") {
-		t.Fatalf("rendered diff missing thread start:\n%s", out)
+		t.Fatalf("rendered diff missing unread thread start:\n%s", out)
+	}
+}
+
+func TestDiffPaneRendersReadThreadStartInRail(t *testing.T) {
+	m := diffPaneTestModel(false)
+	m.store.Threads[0].Messages = []thread.Message{{ID: "m1", Actor: thread.ActorAgent, Body: "fixed"}}
+	m.store.Threads[0].ReadMessageID = "m1"
+	m.session.SetStores(m.store, m.store)
+
+	out := xansi.Strip(m.renderDiff(4))
+	if !strings.Contains(out, "○") {
+		t.Fatalf("rendered diff missing read thread start:\n%s", out)
 	}
 }
 
@@ -74,6 +89,19 @@ func TestInlineThreadKeybindToggles(t *testing.T) {
 	got := updated.(Model)
 	if !got.hideInlineThreads || got.status != "inline threads: false" {
 		t.Fatalf("i toggle = hideInlineThreads %t status %q", got.hideInlineThreads, got.status)
+	}
+}
+
+func TestSelectedUnreadThreadIsMarkedRead(t *testing.T) {
+	m := diffPaneTestModel(false)
+	m.store.Threads[0].Messages = []thread.Message{{ID: "m1", Actor: thread.ActorAgent, Body: "reply"}}
+	m.session.SetStores(m.store, m.store)
+	m.session.MoveLine(1, 10)
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+	got := updated.(Model)
+	if got.store.Threads[0].ReadMessageID != "m1" {
+		t.Fatalf("read message = %q, want m1", got.store.Threads[0].ReadMessageID)
 	}
 }
 

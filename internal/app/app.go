@@ -129,6 +129,7 @@ func loadingSpinnerTick() tea.Cmd {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if next, cmd, ok := m.handleAsyncMsg(msg); ok {
+		next.markSelectedThreadRead()
 		return next, cmd
 	}
 	if m.composing {
@@ -139,8 +140,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.updateWindowSize(msg)
+		m.markSelectedThreadRead()
 	case tea.KeyMsg:
-		return m.updateKey(msg, previousStatus)
+		next, cmd := m.updateKey(msg, previousStatus)
+		if nextModel, ok := next.(Model); ok {
+			nextModel.markSelectedThreadRead()
+			return nextModel, cmd
+		}
+		return next, cmd
 	}
 	return m, m.statusToastCmd(previousStatus)
 }
@@ -320,6 +327,19 @@ func (m Model) selectedThread() (thread.Thread, bool) {
 	return m.session.SelectedThread()
 }
 
+func (m *Model) markSelectedThreadRead() {
+	if m.store == nil {
+		return
+	}
+	selected, ok := m.selectedThread()
+	if !ok || !thread.UnreadForHuman(selected) {
+		return
+	}
+	if err := m.store.MarkThreadRead(selected.ID); err == nil {
+		m.invalidateViewCache()
+	}
+}
+
 func (m *Model) startEditThread(t thread.Thread) error {
 	if !thread.CanEditLatestMessage(t) {
 		return fmt.Errorf("can only edit latest local message")
@@ -454,6 +474,19 @@ func (m Model) threadCount(path string) int {
 	return m.session.ThreadCount(path)
 }
 
+func (m Model) unreadThreadCount(path string) int {
+	if m.store == nil {
+		return 0
+	}
+	unread := 0
+	for _, t := range m.store.ThreadsFor(path) {
+		if thread.UnreadForHuman(t) {
+			unread++
+		}
+	}
+	return unread
+}
+
 func (m Model) totalThreadCount() int {
 	total := 0
 	for _, f := range m.session.Files() {
@@ -462,11 +495,41 @@ func (m Model) totalThreadCount() int {
 	return total
 }
 
+func (m Model) totalUnreadThreadCount() int {
+	total := 0
+	for _, f := range m.session.Files() {
+		total += m.unreadThreadCount(f.Path())
+	}
+	return total
+}
+
 func (m Model) threadsView(count int) string {
+	return threadBadgeView(count, m.totalUnreadThreadCount())
+}
+
+func (m Model) threadBadgeForPath(path string) string {
+	return threadBadgeText(m.threadCount(path), m.unreadThreadCount(path))
+}
+
+func threadBadgeText(count, unread int) string {
 	if count == 0 {
 		return ""
 	}
-	return threadStyle.Render(fmt.Sprintf("●%d", count))
+	if unread > 0 {
+		return fmt.Sprintf("●%d", unread)
+	}
+	return fmt.Sprintf("○%d", count)
+}
+
+func threadBadgeView(count, unread int) string {
+	text := threadBadgeText(count, unread)
+	if text == "" {
+		return ""
+	}
+	if unread > 0 {
+		return threadStyle.Render(text)
+	}
+	return dimStyle.Render(text)
 }
 
 func sidebarHeader(stats, threads string) string {
@@ -480,7 +543,7 @@ func sidebarHeader(stats, threads string) string {
 	return strings.Join(parts, " ")
 }
 
-func selectedSidebarLine(prefix, viewed string, nameW int, path, added, deleted string, threadCount, threadW int) string {
+func selectedSidebarLine(prefix, viewed string, nameW int, path, added, deleted, threadBadge string, threadW int) string {
 	rail := selectedStyle.Render(prefix)
 	if strings.Contains(prefix, "▌") {
 		rail = selectedThreadStyle.Render("▌") + selectedStyle.Render(" ")
@@ -493,35 +556,37 @@ func selectedSidebarLine(prefix, viewed string, nameW int, path, added, deleted 
 		selectedStyle.Render(" ") +
 		selectedDeleteStyle.Render(deleted) +
 		selectedStyle.Render(" ") +
-		sidebarThreadView(threadCount, threadW, true)
+		selectedSidebarThreadView(threadBadge, threadW)
 	return padRightStyled(line, sidebarWidth, selectedStyle)
 }
 
-func sidebarThreadView(count, width int, selected bool) string {
+func sidebarThreadView(badge string, width int) string {
 	thread := strings.Repeat(" ", width)
-	if count > 0 {
-		thread = fmt.Sprintf("%*s", width, fmt.Sprintf("●%d", count))
+	if badge != "" {
+		thread = fmt.Sprintf("%*s", width, badge)
 	}
-	if count == 0 {
-		if selected {
-			return selectedStyle.Render(thread)
-		}
-		return dimStyle.Render(thread)
+	if strings.HasPrefix(badge, "●") {
+		return threadStyle.Render(thread)
 	}
-	if selected {
-		return selectedThreadStyle.Render(thread)
-	}
-	return threadStyle.Render(thread)
+	return dimStyle.Render(thread)
 }
 
-func sidebarColumnWidths(files []diff.File, threadCount func(string) int, statsFor func(diff.File) diffStats) (int, int, int, int) {
+func selectedSidebarThreadView(badge string, width int) string {
+	thread := sidebarThreadView(badge, width)
+	if badge == "" {
+		return selectedStyle.Render(thread)
+	}
+	return selectedThreadStyle.Render(thread)
+}
+
+func sidebarColumnWidths(files []diff.File, threadBadge func(string) string, statsFor func(diff.File) diffStats) (int, int, int, int) {
 	addW, delW, threadW := 0, 0, 2
 	for _, f := range files {
 		stats := statsFor(f)
 		addW = max(addW, xansi.StringWidth(sidebarStat("+", stats.Added)))
 		delW = max(delW, xansi.StringWidth(sidebarStat("-", stats.Deleted)))
-		if threads := threadCount(f.Path()); threads > 0 {
-			threadW = max(threadW, xansi.StringWidth(fmt.Sprintf("●%d", threads)))
+		if badge := threadBadge(f.Path()); badge != "" {
+			threadW = max(threadW, xansi.StringWidth(badge))
 		}
 	}
 	nameW := max(8, sidebarWidth-7-addW-delW-threadW)
@@ -711,7 +776,7 @@ func (m Model) sidebarCacheKey(height int) string {
 	if selected, ok := m.selectedThread(); ok {
 		selectedID = selected.ID
 	}
-	return fmt.Sprintf("sidebar:%d:%d:%d:%s:%d:%t:%t", height, m.session.FileIndex(), len(m.session.Files()), selectedID, m.totalThreadCount(), m.session.HideViewed(), m.session.ThreadsOnly())
+	return fmt.Sprintf("sidebar:%d:%d:%d:%s:%d:%d:%t:%t", height, m.session.FileIndex(), len(m.session.Files()), selectedID, m.totalThreadCount(), m.totalUnreadThreadCount(), m.session.HideViewed(), m.session.ThreadsOnly())
 }
 
 func (m Model) renderSidebar(height int) string {
@@ -724,7 +789,7 @@ func (m Model) renderSidebar(height int) string {
 	style := lipgloss.NewStyle().Width(sidebarWidth)
 	files := m.session.Files()
 	fileIdx := m.session.FileIndex()
-	nameW, addW, delW, threadW := sidebarColumnWidths(files, m.threadCount, m.fileStats)
+	nameW, addW, delW, threadW := sidebarColumnWidths(files, m.threadBadgeForPath, m.fileStats)
 	previewHeight := sidebarThreadHeight(height, m.totalThreadCount())
 	fileHeight := height - previewHeight
 	var rows []string
@@ -744,13 +809,14 @@ func (m Model) renderSidebar(height int) string {
 		}
 		stats := m.fileStats(f)
 		threadCount := m.threadCount(path)
+		threadBadge := threadBadgeText(threadCount, m.unreadThreadCount(path))
 		addedText := fmt.Sprintf("%*s", addW, sidebarStat("+", stats.Added))
 		deletedText := fmt.Sprintf("%*s", delW, sidebarStat("-", stats.Deleted))
 		added := addStyle.Render(addedText)
 		deleted := deleteStyle.Render(deletedText)
-		line := fmt.Sprintf("%s%s %s %s %s %s", prefix, viewed, sidebarPath(path, nameW, false, viewed == "✓"), added, deleted, sidebarThreadView(threadCount, threadW, false))
+		line := fmt.Sprintf("%s%s %s %s %s %s", prefix, viewed, sidebarPath(path, nameW, false, viewed == "✓"), added, deleted, sidebarThreadView(threadBadge, threadW))
 		if i == fileIdx {
-			line = selectedSidebarLine(prefix, viewed, nameW, path, addedText, deletedText, threadCount, threadW)
+			line = selectedSidebarLine(prefix, viewed, nameW, path, addedText, deletedText, threadBadge, threadW)
 		} else if viewed == "✓" {
 			line = dimStyle.Render(line)
 		}
@@ -811,9 +877,10 @@ func (m Model) renderThreadPreview(maxRows int) []string {
 		if replies > 0 {
 			replySuffix = fmt.Sprintf(" ↳%d", replies)
 		}
-		loc := fmt.Sprintf("● %s:%d%s", compactPath(p.Thread.Path, sidebarWidth-8-xansi.StringWidth(replySuffix)), p.Thread.LineStart, replySuffix)
+		glyph := threadGlyph(p.Thread)
+		loc := fmt.Sprintf("%s %s:%d%s", glyph, compactPath(p.Thread.Path, sidebarWidth-8-xansi.StringWidth(replySuffix)), p.Thread.LineStart, replySuffix)
 		if p.Thread.LineEnd != 0 && p.Thread.LineEnd != p.Thread.LineStart {
-			loc = fmt.Sprintf("● %s:%d-%d%s", compactPath(p.Thread.Path, sidebarWidth-10-xansi.StringWidth(replySuffix)), p.Thread.LineStart, p.Thread.LineEnd, replySuffix)
+			loc = fmt.Sprintf("%s %s:%d-%d%s", glyph, compactPath(p.Thread.Path, sidebarWidth-10-xansi.StringWidth(replySuffix)), p.Thread.LineStart, p.Thread.LineEnd, replySuffix)
 		}
 		bodyText := strings.ReplaceAll(thread.Body(p.Thread), "\n", " ")
 		if author := threadAuthor(p.Thread); author != "" {
@@ -844,7 +911,7 @@ func (m Model) renderDiffHeader(width int) string {
 	path := compactPath(m.currentPath(), max(12, width-18))
 	stats := m.statsView(m.fileStats(m.session.Files()[m.session.FileIndex()]))
 	if threads := m.threadCount(m.currentPath()); threads > 0 {
-		stats = strings.TrimSpace(stats + " " + threadStyle.Render(fmt.Sprintf("●%d", threads)))
+		stats = strings.TrimSpace(stats + " " + threadBadgeView(threads, m.unreadThreadCount(m.currentPath())))
 	}
 	line := titleStyle.Render(path)
 	if stats != "" {
@@ -858,7 +925,7 @@ func (m Model) renderStatus() string {
 	files := m.session.Files()
 	stats := m.statsView(m.totalStats())
 	if threads := m.totalThreadCount(); threads > 0 {
-		stats = strings.TrimSpace(stats + " " + threadStyle.Render(fmt.Sprintf("●%d", threads)))
+		stats = strings.TrimSpace(stats + " " + threadBadgeView(threads, m.totalUnreadThreadCount()))
 	}
 	parts := []string{dimStyle.Render(compareTarget), dimStyle.Render(fmt.Sprintf("%d/%d", min(m.session.FileIndex()+1, len(files)), len(files)))}
 	if stats != "" {

@@ -47,22 +47,23 @@ type Review struct {
 }
 
 type Thread struct {
-	ID         string          `json:"id"`
-	Path       string          `json:"path"`
-	Side       Side            `json:"side"`
-	Line       int             `json:"line"`
-	LineStart  int             `json:"line_start,omitempty"`
-	LineEnd    int             `json:"line_end,omitempty"`
-	HunkHeader string          `json:"hunk_header"`
-	Context    string          `json:"context"`
-	Messages   []Message       `json:"messages,omitempty"`
-	Status     Status          `json:"status"`
-	Source     Source          `json:"source,omitempty"`
-	DiffHash   string          `json:"diff_hash"`
-	Outdated   bool            `json:"outdated"`
-	GitHub     *GitHubMetadata `json:"github,omitempty"`
-	CreatedAt  time.Time       `json:"created_at"`
-	UpdatedAt  time.Time       `json:"updated_at"`
+	ID            string          `json:"id"`
+	Path          string          `json:"path"`
+	Side          Side            `json:"side"`
+	Line          int             `json:"line"`
+	LineStart     int             `json:"line_start,omitempty"`
+	LineEnd       int             `json:"line_end,omitempty"`
+	HunkHeader    string          `json:"hunk_header"`
+	Context       string          `json:"context"`
+	Messages      []Message       `json:"messages,omitempty"`
+	Status        Status          `json:"status"`
+	Source        Source          `json:"source,omitempty"`
+	DiffHash      string          `json:"diff_hash"`
+	ReadMessageID string          `json:"-"`
+	Outdated      bool            `json:"outdated"`
+	GitHub        *GitHubMetadata `json:"github,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
+	UpdatedAt     time.Time       `json:"updated_at"`
 }
 
 type Message struct {
@@ -116,10 +117,11 @@ type Event struct {
 }
 
 type Store struct {
-	Review  Review         `json:"review"`
-	GitHub  *gh.AttachedPR `json:"github,omitempty"`
-	Threads []Thread       `json:"threads"`
-	Viewed  []ViewedFile   `json:"viewed"`
+	Review      Review            `json:"review"`
+	GitHub      *gh.AttachedPR    `json:"github,omitempty"`
+	Threads     []Thread          `json:"threads"`
+	Viewed      []ViewedFile      `json:"viewed"`
+	ThreadReads map[string]string `json:"thread_reads,omitempty"`
 
 	path       string
 	eventsPath string
@@ -149,10 +151,11 @@ func Open(gitRoot string) (*Store, error) {
 
 func decodeStore(b []byte, store *Store) error {
 	var payload struct {
-		Review  Review         `json:"review"`
-		GitHub  *gh.AttachedPR `json:"github"`
-		Threads []Thread       `json:"threads"`
-		Viewed  []ViewedFile   `json:"viewed"`
+		Review      Review            `json:"review"`
+		GitHub      *gh.AttachedPR    `json:"github"`
+		Threads     []Thread          `json:"threads"`
+		Viewed      []ViewedFile      `json:"viewed"`
+		ThreadReads map[string]string `json:"thread_reads"`
 	}
 	if err := json.Unmarshal(b, &payload); err != nil {
 		return err
@@ -161,6 +164,8 @@ func decodeStore(b []byte, store *Store) error {
 	store.GitHub = payload.GitHub
 	store.Threads = payload.Threads
 	store.Viewed = payload.Viewed
+	store.ThreadReads = payload.ThreadReads
+	store.applyThreadReads()
 	return nil
 }
 
@@ -194,6 +199,7 @@ func (s *Store) Path() string       { return s.path }
 func (s *Store) EventsPath() string { return s.eventsPath }
 
 func (s *Store) Save() error {
+	s.captureThreadReads()
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err
 	}
@@ -277,6 +283,7 @@ func (s *Store) Delete(id string) error {
 	for i := range s.Threads {
 		if s.Threads[i].ID == id {
 			s.Threads = append(s.Threads[:i], s.Threads[i+1:]...)
+			delete(s.ThreadReads, id)
 			if err := s.Save(); err != nil {
 				return err
 			}
@@ -318,6 +325,7 @@ func (s *Store) Reply(id string, msg Message) error {
 		s.Threads[i].Messages = append(s.Threads[i].Messages, msg)
 		s.Threads[i].UpdatedAt = now
 		if msg.Actor == ActorHuman {
+			s.Threads[i].ReadMessageID = msg.ID
 			s.invalidateApprovalFor(s.Threads[i].DiffHash)
 		}
 		if err := s.Save(); err != nil {
@@ -380,10 +388,56 @@ func (s *Store) ReviewStatus(diffHash string) string {
 	return "pending"
 }
 
+func (s *Store) MarkThreadRead(id string) error {
+	for i := range s.Threads {
+		if s.Threads[i].ID != id {
+			continue
+		}
+		last := LastMessage(s.Threads[i])
+		if last.ID == "" || s.Threads[i].ReadMessageID == last.ID {
+			return nil
+		}
+		s.Threads[i].ReadMessageID = last.ID
+		s.setThreadRead(id, last.ID)
+		if s.path == "" {
+			return nil
+		}
+		return s.Save()
+	}
+	return fmt.Errorf("thread not found")
+}
+
 func (s *Store) invalidateApprovalFor(diffHash string) {
 	if diffHash != "" && s.Review.ApprovedDiffHash == diffHash {
 		s.Review = Review{}
 	}
+}
+
+func (s *Store) applyThreadReads() {
+	if len(s.ThreadReads) == 0 {
+		return
+	}
+	for i := range s.Threads {
+		s.Threads[i].ReadMessageID = s.ThreadReads[s.Threads[i].ID]
+	}
+}
+
+func (s *Store) captureThreadReads() {
+	for _, t := range s.Threads {
+		if t.ReadMessageID != "" {
+			s.setThreadRead(t.ID, t.ReadMessageID)
+		}
+	}
+}
+
+func (s *Store) setThreadRead(id, messageID string) {
+	if id == "" || messageID == "" {
+		return
+	}
+	if s.ThreadReads == nil {
+		s.ThreadReads = make(map[string]string)
+	}
+	s.ThreadReads[id] = messageID
 }
 
 func normalize(t Thread) Thread {
@@ -432,6 +486,11 @@ func LastActor(t Thread) Actor {
 	return t.Messages[len(t.Messages)-1].Actor
 }
 
+func UnreadForHuman(t Thread) bool {
+	last := LastMessage(t)
+	return last.ID != "" && last.Actor != ActorHuman && t.ReadMessageID != last.ID
+}
+
 func (s *Store) AttachGitHubPR(pr gh.AttachedPR) error {
 	s.GitHub = &pr
 	return s.Save()
@@ -453,6 +512,7 @@ func (s *Store) SyncGitHubThreads(pr gh.AttachedPR, threads []gh.Thread) (int, e
 		updated := false
 		for i := range s.Threads {
 			if s.Threads[i].Source == SourceGitHub && s.Threads[i].GitHub != nil && s.Threads[i].GitHub.ThreadID == t.GitHub.ThreadID {
+				t.ReadMessageID = s.Threads[i].ReadMessageID
 				s.Threads[i] = t
 				updated = true
 				break

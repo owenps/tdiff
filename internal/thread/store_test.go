@@ -4,6 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	gh "github.com/owenps/tdiff/internal/github"
 )
 
 func TestOpenUsesGitDirDirectory(t *testing.T) {
@@ -98,6 +101,63 @@ func TestUpdateLatestMessageRejectsLatestAgentMessage(t *testing.T) {
 	}
 	if got := store.Threads[0].Messages[1].Body; got != "agent" {
 		t.Fatalf("latest body = %q, want agent", got)
+	}
+}
+
+func TestUnreadForHumanTracksNonHumanLatestReply(t *testing.T) {
+	store := tempStoreForStoreTest(t)
+	if err := store.Add(Thread{ID: "n1", Path: "a.go", Side: SideNew, Line: 1, Messages: []Message{{Actor: ActorHuman, Body: "first"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if UnreadForHuman(store.Threads[0]) {
+		t.Fatal("human-created thread should start read")
+	}
+	if err := store.Reply("n1", Message{Actor: ActorAgent, Body: "agent"}); err != nil {
+		t.Fatal(err)
+	}
+	if !UnreadForHuman(store.Threads[0]) {
+		t.Fatal("agent reply should be unread")
+	}
+	if err := store.MarkThreadRead("n1"); err != nil {
+		t.Fatal(err)
+	}
+	if UnreadForHuman(store.Threads[0]) {
+		t.Fatal("marked thread should be read")
+	}
+	if err := store.Reply("n1", Message{Actor: ActorHuman, Body: "human"}); err != nil {
+		t.Fatal(err)
+	}
+	if UnreadForHuman(store.Threads[0]) {
+		t.Fatal("human reply should stay read")
+	}
+}
+
+func TestSyncGitHubThreadsPreservesReadUntilNewReply(t *testing.T) {
+	store := tempStoreForStoreTest(t)
+	pr := gh.AttachedPR{Owner: "o", Repo: "r", Number: 1}
+	first := gh.Thread{ID: "gh1", Path: "a.go", Line: 3, Side: "RIGHT", Comments: []gh.Comment{{ID: "c1", Body: "one", CreatedAt: time.Now(), UpdatedAt: time.Now()}}}
+	if _, err := store.SyncGitHubThreads(pr, []gh.Thread{first}); err != nil {
+		t.Fatal(err)
+	}
+	if !UnreadForHuman(store.Threads[0]) {
+		t.Fatal("new github thread should be unread")
+	}
+	if err := store.MarkThreadRead("github:gh1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SyncGitHubThreads(pr, []gh.Thread{first}); err != nil {
+		t.Fatal(err)
+	}
+	if UnreadForHuman(store.Threads[0]) {
+		t.Fatal("unchanged github thread should stay read")
+	}
+	second := first
+	second.Comments = append(second.Comments, gh.Comment{ID: "c2", Body: "two", CreatedAt: time.Now(), UpdatedAt: time.Now()})
+	if _, err := store.SyncGitHubThreads(pr, []gh.Thread{second}); err != nil {
+		t.Fatal(err)
+	}
+	if !UnreadForHuman(store.Threads[0]) {
+		t.Fatal("new github reply should be unread")
 	}
 }
 

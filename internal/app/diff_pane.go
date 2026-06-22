@@ -37,7 +37,7 @@ func newThreadMarkers(threads []thread.Thread) threadMarkers {
 		for line := start; line <= end; line++ {
 			glyph := "│"
 			if start == end || line == start {
-				glyph = "●"
+				glyph = threadGlyph(thread)
 			} else if line == end {
 				glyph = "╰"
 			}
@@ -47,6 +47,13 @@ func newThreadMarkers(threads []thread.Thread) threadMarkers {
 		}
 	}
 	return markers
+}
+
+func threadGlyph(t thread.Thread) string {
+	if thread.UnreadForHuman(t) {
+		return "●"
+	}
+	return "○"
 }
 
 func (m threadMarkers) markerForLine(line diff.Line) string {

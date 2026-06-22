@@ -1108,18 +1108,18 @@ func (p diffPane) formatWrappedSplitRow(row splitRow, marker, rangeGlyph string,
 	rows := make([]string, 0, rowCount)
 	for i := 0; i < rowCount; i++ {
 		linePrefix := selectedStyle.Render(strings.Repeat(" ", 2))
-		leftNo := selectedStyle.Render(strings.Repeat(" ", xansi.StringWidth(oldPrefix)))
-		newNo := selectedStyle.Render(strings.Repeat(" ", xansi.StringWidth(newPrefix)))
+		leftNo := splitCellPadStyle(oldSelected, oldInRange).Render(strings.Repeat(" ", xansi.StringWidth(oldPrefix)))
+		newNo := splitCellPadStyle(newSelected, newInRange).Render(strings.Repeat(" ", xansi.StringWidth(newPrefix)))
 		if i == 0 {
 			linePrefix = railCell(railGlyph(marker, rangeGlyph), true, inRange) + selectedStyle.Render(" ")
 			leftNo = oldPrefix
 			newNo = newPrefix
 		}
-		left := selectedStyle.Render(strings.Repeat(" ", leftW))
+		left := splitCellPadStyle(oldSelected, oldInRange).Render(strings.Repeat(" ", leftW))
 		if i < len(leftRows) {
 			left = leftRows[i]
 		}
-		right := selectedStyle.Render(strings.Repeat(" ", rightW))
+		right := splitCellPadStyle(newSelected, newInRange).Render(strings.Repeat(" ", rightW))
 		if i < len(rightRows) {
 			right = rightRows[i]
 		}
@@ -1134,7 +1134,7 @@ func (p diffPane) splitCellTextRows(line *diff.Line, side thread.Side, width int
 		return nil
 	}
 	if line == nil {
-		return []string{selectedStyle.Render(strings.Repeat(" ", width))}
+		return []string{splitCellPadStyle(selected, inRange).Render(strings.Repeat(" ", width))}
 	}
 	kind := splitLineKind(line, side)
 	marker, body := diffMarkerBody(line.Text)
@@ -1144,7 +1144,7 @@ func (p diffPane) splitCellTextRows(line *diff.Line, side thread.Side, width int
 	for i, part := range parts {
 		sign := diffSignView(marker, kind, selected, inRange)
 		if i > 0 {
-			sign = selectedStyle.Render(" ")
+			sign = splitCellPadStyle(selected, inRange).Render(" ")
 		}
 		text := sign + gutterView(" ", selected, inRange) + part
 		rows = append(rows, padRightStyled(text, width, splitCellPadStyle(selected, inRange)))

@@ -95,13 +95,12 @@ func runAgent(args []string) error {
 }
 
 func mainHelpText() string {
-	return `tdiff - review changes like a PR, without leaving terminal
+	return `tdiff - terminal diff review
 
 Usage:
   tdiff [--base <ref>] [--staged|--unstaged] [--offline]
-  tdiff review status|context|approve|unapprove|watch
+  tdiff review status|context|approve|unapprove|watch|events
   tdiff thread list|show|add|reply|resolve|reopen
-  tdiff events [--follow]
   tdiff agent help
 
 Agent quick start:
@@ -149,7 +148,7 @@ Rules:
 
 JSON options:
   tdiff review watch --json
-  tdiff events --follow --json
+  tdiff review events --json
 
 `
 }
@@ -175,7 +174,7 @@ func runTUI(ctx context.Context, args []string) error {
 
 func runReview(ctx context.Context, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: tdiff review status|context|approve|unapprove|watch")
+		return errors.New("usage: tdiff review status|context|approve|unapprove|watch|events")
 	}
 	sub := args[0]
 	switch sub {
@@ -245,19 +244,26 @@ func runReview(ctx context.Context, args []string) error {
 		fmt.Printf("approval removed %s\n", loaded.snap.Hash)
 		return nil
 	case "watch":
-		dfs := newDiffFlagSet("tdiff review watch")
-		jsonOut := dfs.fs.Bool("json", false, "emit JSON lines")
-		if err := dfs.fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		loaded, err := loadReview(ctx, dfs.opts())
-		if err != nil {
-			return err
-		}
-		return streamEvents(loaded.store.EventsPath(), true, *jsonOut)
+		return runReviewEvents(ctx, "tdiff review watch", args[1:], true)
+	case "events":
+		return runReviewEvents(ctx, "tdiff review events", args[1:], false)
 	default:
 		return fmt.Errorf("unknown review command %q", sub)
 	}
+}
+
+func runReviewEvents(ctx context.Context, name string, args []string, followDefault bool) error {
+	dfs := newDiffFlagSet(name)
+	jsonOut := dfs.fs.Bool("json", false, "emit JSON lines")
+	follow := dfs.fs.Bool("follow", followDefault, "follow new events")
+	if err := dfs.fs.Parse(args); err != nil {
+		return err
+	}
+	loaded, err := loadReview(ctx, dfs.opts())
+	if err != nil {
+		return err
+	}
+	return streamEvents(loaded.store.EventsPath(), *follow, *jsonOut)
 }
 
 func runThread(ctx context.Context, args []string) error {

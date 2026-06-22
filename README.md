@@ -71,7 +71,8 @@ tdiff review context --json
 tdiff review approve
 tdiff review unapprove
 tdiff review watch
-# JSONL if needed:
+# event history / JSONL if needed:
+tdiff review events
 tdiff review watch --json
 
 tdiff thread list --json
@@ -82,11 +83,6 @@ tdiff thread resolve T123
 tdiff thread reopen T123
 # use --body - to read long thread text from stdin
 
-tdiff events
-tdiff events --follow
-# JSONL if needed:
-tdiff events --json
-tdiff events --follow --json
 ```
 
 ## Data

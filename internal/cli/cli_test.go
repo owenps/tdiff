@@ -15,11 +15,14 @@ func TestMainHelpPointsAgentsToAgentHelp(t *testing.T) {
 			t.Fatalf("main help missing %q:\n%s", want, got)
 		}
 	}
+	if strings.Contains(got, "tdiff events") {
+		t.Fatalf("main help exposes legacy events command:\n%s", got)
+	}
 }
 
 func TestAgentHelpContainsWorkflowAndExplicitEventKeys(t *testing.T) {
 	got := agentHelpText()
-	for _, want := range []string{"tdiff review watch", "tdiff thread show <thread_id> --json", "thread_id=", "body_preview=", "Do not approve"} {
+	for _, want := range []string{"tdiff review watch", "tdiff review events --json", "tdiff thread show <thread_id> --json", "thread_id=", "body_preview=", "Do not approve"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("agent help missing %q:\n%s", want, got)
 		}

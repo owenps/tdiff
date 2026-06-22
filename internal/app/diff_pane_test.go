@@ -339,6 +339,46 @@ func TestSplitNavigationMovesByVisualRows(t *testing.T) {
 	}
 }
 
+func TestSplitSelectionHighlightsWholeVisualRow(t *testing.T) {
+	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1,3 +1,3 @@", Lines: []diff.Line{
+		{Kind: diff.Context, OldNo: 1, NewNo: 1, Text: " before"},
+		{Kind: diff.Delete, OldNo: 2, Text: "-old"},
+		{Kind: diff.Add, NewNo: 2, Text: "+new"},
+		{Kind: diff.Context, OldNo: 3, NewNo: 3, Text: " after"},
+	}}}}
+	store := &thread.Store{}
+	m := Model{store: store, threads: threadworkflow.NewWorkflow(store), session: review.NewSession([]diff.File{file}), width: 80, height: 12, split: true, syntax: false, syntaxCache: make(map[string]string)}
+	m.session.JumpToIndex(0, 4, m.bodyHeight())
+	m.moveLine(-1)
+
+	rows := m.splitNavForCurrentFile().rows
+	pane := m.diffPane(m.diffWidth())
+	oldSelected, newSelected, _, _ := pane.splitRowSideState(rows[2])
+	if !oldSelected || !newSelected {
+		t.Fatalf("split replacement row selection old=%t new=%t", oldSelected, newSelected)
+	}
+}
+
+func TestSplitSelectionHighlightsEmptySide(t *testing.T) {
+	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1,4 +1,3 @@", Lines: []diff.Line{
+		{Kind: diff.Context, OldNo: 1, NewNo: 1, Text: " before"},
+		{Kind: diff.Delete, OldNo: 2, Text: "-old one"},
+		{Kind: diff.Delete, OldNo: 3, Text: "-old two"},
+		{Kind: diff.Add, NewNo: 2, Text: "+new"},
+		{Kind: diff.Context, OldNo: 4, NewNo: 3, Text: " after"},
+	}}}}
+	store := &thread.Store{}
+	m := Model{store: store, threads: threadworkflow.NewWorkflow(store), session: review.NewSession([]diff.File{file}), width: 80, height: 12, split: true, syntax: false, syntaxCache: make(map[string]string)}
+	m.session.JumpToIndex(0, 3, m.bodyHeight())
+
+	rows := m.splitNavForCurrentFile().rows
+	pane := m.diffPane(m.diffWidth())
+	oldSelected, newSelected, _, _ := pane.splitRowSideState(rows[3])
+	if !oldSelected || !newSelected {
+		t.Fatalf("split empty-side row selection old=%t new=%t", oldSelected, newSelected)
+	}
+}
+
 func TestSplitRangeRenderingMarksOnlyRangeSide(t *testing.T) {
 	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1,3 +1,3 @@", Lines: []diff.Line{
 		{Kind: diff.Context, OldNo: 1, NewNo: 1, Text: " before"},

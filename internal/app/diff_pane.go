@@ -1042,8 +1042,10 @@ func (p diffPane) splitRowSideState(row splitRow) (oldSelected, newSelected, old
 		newInRange = side == thread.SideNew && row.newIdx >= 0 && p.inActiveRange(row.newIdx)
 		return oldSelected, newSelected, oldInRange, newInRange
 	}
-	oldSelected = row.oldIdx == current
-	newSelected = row.newIdx == current
+	if row.oldIdx == current || row.newIdx == current {
+		oldSelected = true
+		newSelected = true
+	}
 	return oldSelected, newSelected, false, false
 }
 

@@ -58,6 +58,19 @@ func TestHumanThreadInvalidatesApprovalForSameDiff(t *testing.T) {
 	}
 }
 
+func TestAddGeneratesShortThreadIDs(t *testing.T) {
+	store := tempStoreForStoreTest(t)
+	if err := store.Add(Thread{Path: "a.go", Side: SideNew, Line: 1, Messages: []Message{{Actor: ActorHuman, Body: "first"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add(Thread{Path: "b.go", Side: SideNew, Line: 1, Messages: []Message{{Actor: ActorHuman, Body: "second"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if store.Threads[0].ID != "T1" || store.Threads[1].ID != "T2" {
+		t.Fatalf("ids = %q, %q", store.Threads[0].ID, store.Threads[1].ID)
+	}
+}
+
 func TestUnapproveClearsApproval(t *testing.T) {
 	store := tempStoreForStoreTest(t)
 	if err := store.Approve("hash"); err != nil {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -214,7 +215,7 @@ func (s *Store) Add(t Thread) error {
 	now := time.Now()
 	t = normalize(t)
 	if t.ID == "" {
-		t.ID = fmt.Sprintf("T%d", now.UnixNano())
+		t.ID = s.nextThreadID()
 	}
 	if t.CreatedAt.IsZero() {
 		t.CreatedAt = now
@@ -438,6 +439,27 @@ func (s *Store) setThreadRead(id, messageID string) {
 		s.ThreadReads = make(map[string]string)
 	}
 	s.ThreadReads[id] = messageID
+}
+
+func (s *Store) nextThreadID() string {
+	maxID := int64(0)
+	seen := map[string]bool{}
+	for _, t := range s.Threads {
+		seen[t.ID] = true
+		if len(t.ID) < 2 || t.ID[0] != 'T' {
+			continue
+		}
+		n, err := strconv.ParseInt(strings.ToLower(t.ID[1:]), 36, 64)
+		if err == nil && n > maxID {
+			maxID = n
+		}
+	}
+	for n := maxID + 1; ; n++ {
+		id := "T" + strings.ToUpper(strconv.FormatInt(n, 36))
+		if !seen[id] {
+			return id
+		}
+	}
 }
 
 func normalize(t Thread) Thread {

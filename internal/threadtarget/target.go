@@ -46,19 +46,40 @@ func MatchesLine(n thread.Thread, l diff.Line) bool {
 }
 
 func CurrentInFiles(n thread.Thread, files []diff.File) bool {
+	start, end := Range(n)
+	if start == 0 {
+		return false
+	}
+	wantContext := strings.TrimSuffix(n.Context, "\n")
 	for _, f := range files {
 		if f.Path() != n.Path {
 			continue
 		}
-		for _, h := range f.Hunks {
-			for _, l := range h.Lines {
-				if MatchesLine(n, l) {
-					return true
-				}
+		var got []string
+		for line := start; line <= end; line++ {
+			text, ok := textForSideLine(f, n.Side, line)
+			if !ok {
+				return false
+			}
+			got = append(got, text)
+		}
+		if wantContext == "" || strings.Join(got, "\n") == wantContext {
+			return true
+		}
+		return false
+	}
+	return false
+}
+
+func textForSideLine(f diff.File, side thread.Side, line int) (string, bool) {
+	for _, h := range f.Hunks {
+		for _, l := range h.Lines {
+			if LineNumber(l, side) == line {
+				return l.Text, true
 			}
 		}
 	}
-	return false
+	return "", false
 }
 
 func ContextForRange(files []diff.File, path string, side thread.Side, start, end int) (string, string, bool) {

@@ -57,6 +57,33 @@ func TestCurrentInFilesNormalizesLegacyThreadRange(t *testing.T) {
 	}
 }
 
+func TestCurrentInFilesRequiresFullRange(t *testing.T) {
+	files := []diff.File{{NewPath: "foo.go", Hunks: []diff.Hunk{{Lines: []diff.Line{{Kind: diff.Add, NewNo: 7, Text: "+one"}}}}}}
+	thread := thread.Thread{Path: "foo.go", Side: thread.SideNew, LineStart: 7, LineEnd: 8, Context: "+one\n+two"}
+
+	if CurrentInFiles(thread, files) {
+		t.Fatal("partial range should be stale")
+	}
+}
+
+func TestCurrentInFilesRequiresContextMatch(t *testing.T) {
+	files := []diff.File{{NewPath: "foo.go", Hunks: []diff.Hunk{{Lines: []diff.Line{{Kind: diff.Add, NewNo: 7, Text: "+changed"}}}}}}
+	thread := thread.Thread{Path: "foo.go", Side: thread.SideNew, LineStart: 7, LineEnd: 7, Context: "+original"}
+
+	if CurrentInFiles(thread, files) {
+		t.Fatal("same line number with changed context should be stale")
+	}
+}
+
+func TestCurrentInFilesAllowsMissingLegacyContext(t *testing.T) {
+	files := []diff.File{{NewPath: "foo.go", Hunks: []diff.Hunk{{Lines: []diff.Line{{Kind: diff.Add, NewNo: 7, Text: "+changed"}}}}}}
+	thread := thread.Thread{Path: "foo.go", Side: thread.SideNew, LineStart: 7, LineEnd: 7}
+
+	if !CurrentInFiles(thread, files) {
+		t.Fatal("thread without stored context should use full-range line presence")
+	}
+}
+
 func TestContextForRangeReturnsHunkContextOnSide(t *testing.T) {
 	files := []diff.File{{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@", Lines: []diff.Line{
 		{Kind: diff.Delete, OldNo: 1, Text: "-old"},

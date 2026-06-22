@@ -1036,8 +1036,6 @@ func prStatusView(pr gh.AttachedPR) string {
 		return successStyle.Render(label + " ready")
 	case gh.PRStatusDraft:
 		return dimStyle.Render(label + " draft")
-	case gh.PRStatusChanges:
-		return warningStyle.Render(label + " changes")
 	case gh.PRStatusBlocked:
 		return errorStyle.Render(label + " blocked")
 	case gh.PRStatusMerged:

@@ -23,12 +23,12 @@ func TestDerivePRStatus(t *testing.T) {
 		{name: "closed", state: "CLOSED", want: PRStatusClosed},
 		{name: "conflict", state: "OPEN", mergeable: "CONFLICTING", want: PRStatusBlocked},
 		{name: "failing checks", state: "OPEN", mergeable: "MERGEABLE", checks: `[{"conclusion":"FAILURE","status":"COMPLETED"}]`, want: PRStatusBlocked},
-		{name: "changes requested", state: "OPEN", mergeable: "MERGEABLE", reviewDecision: "CHANGES_REQUESTED", want: PRStatusChanges},
+		{name: "changes requested doesn't get separate badge", state: "OPEN", mergeable: "MERGEABLE", reviewDecision: "CHANGES_REQUESTED", checks: `[]`, want: PRStatusReady},
 		{name: "draft", state: "OPEN", mergeable: "MERGEABLE", isDraft: true, want: PRStatusDraft},
 		{name: "ready approved", state: "OPEN", mergeable: "MERGEABLE", reviewDecision: "APPROVED", checks: `[{"conclusion":"SUCCESS","status":"COMPLETED"}]`, want: PRStatusReady},
 		{name: "ready no review", state: "OPEN", mergeable: "MERGEABLE", checks: `[]`, want: PRStatusReady},
 		{name: "pending hidden", state: "OPEN", mergeable: "MERGEABLE", reviewDecision: "APPROVED", checks: `[{"status":"IN_PROGRESS"}]`, want: ""},
-		{name: "review pending hidden", state: "OPEN", mergeable: "MERGEABLE", reviewDecision: "REVIEW_REQUIRED", checks: `[]`, want: ""},
+		{name: "review required still mergeable ready", state: "OPEN", mergeable: "MERGEABLE", reviewDecision: "REVIEW_REQUIRED", checks: `[]`, want: PRStatusReady},
 		{name: "unknown hidden", state: "OPEN", mergeable: "UNKNOWN", checks: `[]`, want: ""},
 	}
 	for _, tc := range cases {

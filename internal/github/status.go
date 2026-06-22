@@ -12,7 +12,6 @@ type PRStatus string
 const (
 	PRStatusReady   PRStatus = "ready"
 	PRStatusDraft   PRStatus = "draft"
-	PRStatusChanges PRStatus = "changes"
 	PRStatusBlocked PRStatus = "blocked"
 	PRStatusMerged  PRStatus = "merged"
 	PRStatusClosed  PRStatus = "closed"
@@ -33,13 +32,10 @@ func derivePRStatus(state string, mergedAt *time.Time, mergeable, reviewDecision
 	if mergeable == "CONFLICTING" || mergeable == "DIRTY" || mergeable == "BLOCKED" || checksFailing {
 		return PRStatusBlocked
 	}
-	if reviewDecision == "CHANGES_REQUESTED" {
-		return PRStatusChanges
-	}
 	if isDraft {
 		return PRStatusDraft
 	}
-	if mergeable == "MERGEABLE" && reviewDecision != "REVIEW_REQUIRED" && !checksPending {
+	if mergeable == "MERGEABLE" && !checksPending {
 		return PRStatusReady
 	}
 	return ""

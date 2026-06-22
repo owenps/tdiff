@@ -245,6 +245,30 @@ query($owner:String!, $name:String!, $number:Int!) {
   }
 }`
 
+const resolveThreadMutation = `
+mutation($threadId:ID!) {
+  resolveReviewThread(input:{threadId:$threadId}) {
+    thread { id isResolved }
+  }
+}`
+
+const unresolveThreadMutation = `
+mutation($threadId:ID!) {
+  unresolveReviewThread(input:{threadId:$threadId}) {
+    thread { id isResolved }
+  }
+}`
+
+func (c Client) ResolveThread(ctx context.Context, threadID string) error {
+	_, err := c.run(ctx, "api", "graphql", "-f", "query="+resolveThreadMutation, "-f", "threadId="+threadID)
+	return err
+}
+
+func (c Client) UnresolveThread(ctx context.Context, threadID string) error {
+	_, err := c.run(ctx, "api", "graphql", "-f", "query="+unresolveThreadMutation, "-f", "threadId="+threadID)
+	return err
+}
+
 func (c Client) Threads(ctx context.Context, pr AttachedPR) ([]Thread, error) {
 	b, err := c.run(ctx, "api", "graphql", "-f", "query="+threadsQuery, "-f", "owner="+pr.Owner, "-f", "name="+pr.Repo, "-F", fmt.Sprintf("number=%d", pr.Number))
 	if err != nil {

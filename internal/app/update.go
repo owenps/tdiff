@@ -8,6 +8,7 @@ import (
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
+	gh "github.com/owenps/tdiff/internal/github"
 	"github.com/owenps/tdiff/internal/thread"
 	"github.com/owenps/tdiff/internal/threadworkflow"
 )
@@ -37,6 +38,10 @@ func (m Model) handleAsyncMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 	case refreshLoadedMsg:
 		previousStatus := m.status
 		m.handleRefreshLoaded(msg)
+		return m, m.statusToastCmd(previousStatus), true
+	case threadStatusChangedMsg:
+		previousStatus := m.status
+		m.handleThreadStatusChanged(msg)
 		return m, m.statusToastCmd(previousStatus), true
 	case clearStatusMsg:
 		if msg.id == m.statusID {
@@ -261,6 +266,8 @@ func (m Model) updateKey(msg tea.KeyMsg, previousStatus string) (tea.Model, tea.
 		m.approveReview()
 	case "v":
 		m.toggleViewedStatus()
+	case "z":
+		return m.toggleThreadResolvedKey(previousStatus)
 	case "r":
 		m.toggleRangeStatus()
 	case "a", "t":
@@ -362,6 +369,79 @@ func (m *Model) approveReview() {
 		return
 	}
 	m.status = "review approved"
+}
+
+func (m Model) toggleThreadResolvedKey(previousStatus string) (tea.Model, tea.Cmd) {
+	m.pendingKey = ""
+	selected, ok := m.selectedThread()
+	if !ok {
+		m.status = "no thread on selected line"
+		return m, m.statusToastCmd(previousStatus)
+	}
+	next := thread.StatusResolved
+	label := "resolved"
+	if selected.Status == thread.StatusResolved {
+		next = thread.StatusOpen
+		label = "reopened"
+	}
+	if selected.Source != thread.SourceGitHub {
+		if err := m.setThreadStatus(selected.ID, next); err != nil {
+			m.status = err.Error()
+		} else {
+			m.status = "thread " + label
+		}
+		return m, m.statusToastCmd(previousStatus)
+	}
+	if selected.GitHub == nil || selected.GitHub.ThreadID == "" {
+		m.status = "github thread missing id"
+		return m, m.statusToastCmd(previousStatus)
+	}
+	m.status = "thread " + label + "…"
+	threadID := selected.GitHub.ThreadID
+	localID := selected.ID
+	repoRoot := m.repo.Root
+	return m, func() tea.Msg {
+		client := gh.NewClient(repoRoot)
+		var err error
+		if next == thread.StatusResolved {
+			err = client.ResolveThread(context.Background(), threadID)
+		} else {
+			err = client.UnresolveThread(context.Background(), threadID)
+		}
+		return threadStatusChangedMsg{id: localID, status: next, err: err}
+	}
+}
+
+func (m *Model) handleThreadStatusChanged(msg threadStatusChangedMsg) {
+	if msg.err != nil {
+		m.logDebug("github thread status failed: %v", msg.err)
+		m.status = "github thread status failed"
+		return
+	}
+	if err := m.setThreadStatus(msg.id, msg.status); err != nil {
+		m.status = err.Error()
+		return
+	}
+	if msg.status == thread.StatusResolved {
+		m.status = "thread resolved"
+	} else {
+		m.status = "thread reopened"
+	}
+}
+
+func (m *Model) setThreadStatus(id string, status thread.Status) error {
+	if status == thread.StatusResolved {
+		if err := m.store.Resolve(id, thread.ActorHuman); err != nil {
+			return err
+		}
+	} else {
+		if err := m.store.Reopen(id, thread.ActorHuman); err != nil {
+			return err
+		}
+	}
+	m.session.RefreshFilters()
+	m.invalidateViewCache()
+	return nil
 }
 
 func (m *Model) toggleRangeStatus() {

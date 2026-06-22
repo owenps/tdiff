@@ -13,6 +13,14 @@ import (
 	"github.com/owenps/tdiff/internal/threadworkflow"
 )
 
+func TestThreadCardTitleShowsGitHubSource(t *testing.T) {
+	pane := diffPane{}
+	got := pane.threadCardTitle(thread.Thread{Source: thread.SourceGitHub, Messages: []thread.Message{{ID: "m1"}, {ID: "m2"}, {ID: "m3"}}})
+	if got != "github · 2 replies" {
+		t.Fatalf("title = %q", got)
+	}
+}
+
 func TestDiffPaneRendersUnifiedThreadAndRange(t *testing.T) {
 	m := diffPaneTestModel(false)
 	m.session.MoveLine(1, 10)

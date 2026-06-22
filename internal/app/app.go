@@ -122,6 +122,12 @@ type refreshLoadedMsg struct {
 	noPR          bool
 }
 
+type threadStatusChangedMsg struct {
+	id     string
+	status thread.Status
+	err    error
+}
+
 func loadingSpinnerTick() tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
 		return loadingSpinnerTickMsg{}
@@ -1039,7 +1045,7 @@ func (m Model) footerHints() string {
 		return "? close"
 	}
 	if _, ok := m.selectedThread(); ok {
-		return "enter reply · e edit · d delete · ]t/[t threads · y copy"
+		return "z resolve · enter reply · e edit · d delete · ]t/[t threads · y copy"
 	}
 	return "a add thread · A approve · r range · v viewed · ? help"
 }
@@ -1062,6 +1068,7 @@ func (m Model) renderHelp() string {
 		"  m          threads-only filter",
 		"  r          start/cancel range",
 		"  a/e/d      add/edit/delete thread",
+		"  z          resolve/reopen selected thread",
 		"  enter      reply to selected thread",
 		"  y/Y        copy selected/all threads",
 		"  ⌥+enter    save thread",

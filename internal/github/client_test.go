@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -11,7 +12,11 @@ type fakeRunner map[string]string
 
 func (f fakeRunner) Run(_ context.Context, _ string, args ...string) ([]byte, error) {
 	key := strings.Join(args, " ")
-	return []byte(f[key]), nil
+	out, ok := f[key]
+	if !ok {
+		return nil, fmt.Errorf("unexpected command: %s", key)
+	}
+	return []byte(out), nil
 }
 
 func TestPRViewParsesStatus(t *testing.T) {
@@ -46,6 +51,19 @@ func TestFormatRunErrorCompactsGraphQLQuery(t *testing.T) {
 	got := err.Error()
 	if strings.Contains(got, "query { huge }") || strings.Contains(got, "owner=o") || !strings.Contains(got, "gh api graphql failed") || !strings.Contains(got, "GraphQL: forbidden") {
 		t.Fatalf("bad error: %s", got)
+	}
+}
+
+func TestResolveThreadRunsMutation(t *testing.T) {
+	client := Client{Runner: fakeRunner{
+		"api graphql -f query=" + resolveThreadMutation + " -f threadId=t1":   `{}`,
+		"api graphql -f query=" + unresolveThreadMutation + " -f threadId=t1": `{}`,
+	}}
+	if err := client.ResolveThread(context.Background(), "t1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.UnresolveThread(context.Background(), "t1"); err != nil {
+		t.Fatal(err)
 	}
 }
 

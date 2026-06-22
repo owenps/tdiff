@@ -131,6 +131,7 @@ Run `tdiff --debug` to write integration/debug failures to `.git/tdiff/debug.log
 - <kbd>L</kbd> toggle line numbers
 - <kbd>r</kbd> start/cancel line range
 - <kbd>a</kbd> add/edit thread on selected line/range
+- <kbd>z</kbd> resolve/reopen selected thread, including GitHub threads
 - <kbd>enter</kbd> reply to selected thread
 - <kbd>e</kbd> edit thread on selected line/range
 - <kbd>d</kbd> delete thread on selected line/range

@@ -598,11 +598,14 @@ func (p diffPane) threadCardRows(t thread.Thread, maxRows int) []string {
 }
 
 func (p diffPane) threadCardTitle(t thread.Thread) string {
-	replies := threadReplyCount(t)
-	if replies == 0 {
-		return ""
+	parts := []string{}
+	if t.Source == thread.SourceGitHub {
+		parts = append(parts, "github")
 	}
-	return threadReplyLabel(replies)
+	if replies := threadReplyCount(t); replies > 0 {
+		parts = append(parts, threadReplyLabel(replies))
+	}
+	return strings.Join(parts, " · ")
 }
 
 func threadReplyCount(t thread.Thread) int {

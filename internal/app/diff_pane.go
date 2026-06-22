@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/alecthomas/chroma/v2/formatters"
 	"github.com/alecthomas/chroma/v2/lexers"
@@ -873,7 +875,7 @@ func (p diffPane) formatFullWidthSplitRow(row splitRow, prefix, marker, rangeGly
 		linePrefix := railCell(railGlyph(marker, rangeGlyph), true, inRange) + selectedStyle.Render(" ") + rest + diffSignView(diffSign, kind, true, inRange) + gutterView(" ", true, inRange)
 		bodyW := max(1, p.width-xansi.StringWidth(linePrefix))
 		if xansi.StringWidth(body) > bodyW {
-			return p.wrapSelectedBody(linePrefix, kind, body, true, inRange, syntaxOK, bodyW)
+			return p.wrapSelectedBody(linePrefix, kind, body, true, inRange, syntaxOK, bodyW, "")
 		}
 	}
 	rest += p.splitCellText(line, side, cellW, selected, inRange, syntaxOK, "")
@@ -939,18 +941,14 @@ func (p diffPane) splitCellTextRows(line *diff.Line, side thread.Side, width int
 	kind := splitLineKind(line, side)
 	marker, body := diffMarkerBody(line.Text)
 	bodyW := max(1, width-2)
-	parts := wrappedParts(body, bodyW)
+	parts := p.wrappedBodyParts(kind, body, selected, inRange, syntaxOK, bodyW, intralineAgainst)
 	rows := make([]string, 0, len(parts))
 	for i, part := range parts {
 		sign := diffSignView(marker, kind, selected, inRange)
 		if i > 0 {
 			sign = selectedStyle.Render(" ")
 		}
-		bodyPart := p.syntaxBodyView(kind, part, selected, inRange, syntaxOK)
-		if intralineAgainst != "" && (kind == diff.Add || kind == diff.Delete) {
-			bodyPart = p.intralineTextView(kind, part, intralineAgainst, selected, inRange, syntaxOK)
-		}
-		text := sign + gutterView(" ", selected, inRange) + bodyPart
+		text := sign + gutterView(" ", selected, inRange) + part
 		rows = append(rows, padRightStyled(text, width, splitCellPadStyle(selected, inRange)))
 	}
 	return rows
@@ -1049,7 +1047,7 @@ func (p diffPane) formatUnifiedLine(l diff.Line, marker string, selected, inRang
 		linePrefix := railCell(railGlyph(marker, rangeGlyph), true, inRange) + selectedStyle.Render(" ") + restPrefix
 		bodyW := max(1, p.width-xansi.StringWidth(linePrefix))
 		if p.wrapCursorLine && xansi.StringWidth(body) > bodyW {
-			return p.wrapSelectedBody(linePrefix, l.Kind, body, true, inRange, syntaxOK, bodyW)
+			return p.wrapSelectedBody(linePrefix, l.Kind, body, true, inRange, syntaxOK, bodyW, intralineAgainst)
 		}
 		return padRightStyled(truncate(linePrefix+bodyView, p.width), p.width, selectedStyle)
 	}
@@ -1062,20 +1060,19 @@ func (p diffPane) wrapSelectedLine(prefix, body string) string {
 		return wrapPadded(prefix+body, p.width, selectedStyle)
 	}
 	bodyW := max(1, p.width-prefixW)
-	return p.wrapSelectedBody(prefix, diff.Context, body, true, false, false, bodyW)
+	return p.wrapSelectedBody(prefix, diff.Context, body, true, false, false, bodyW, "")
 }
 
-func (p diffPane) wrapSelectedBody(prefix string, kind diff.Kind, body string, selected, inRange, syntaxOK bool, bodyW int) string {
+func (p diffPane) wrapSelectedBody(prefix string, kind diff.Kind, body string, selected, inRange, syntaxOK bool, bodyW int, intralineAgainst string) string {
 	prefixW := xansi.StringWidth(prefix)
-	parts := wrappedParts(body, bodyW)
+	parts := p.wrappedBodyParts(kind, body, selected, inRange, syntaxOK, bodyW, intralineAgainst)
 	rows := make([]string, 0, len(parts))
 	for i, part := range parts {
 		linePrefix := prefix
 		if i > 0 {
 			linePrefix = selectedStyle.Render(strings.Repeat(" ", prefixW))
 		}
-		bodyPart := p.syntaxBodyView(kind, part, selected, inRange, syntaxOK)
-		rows = append(rows, padRightStyled(linePrefix+bodyPart, p.width, selectedStyle))
+		rows = append(rows, padRightStyled(linePrefix+part, p.width, selectedStyle))
 	}
 	return strings.Join(rows, "\n")
 }
@@ -1095,6 +1092,144 @@ func wrappedParts(s string, width int) []string {
 		return []string{""}
 	}
 	return strings.Split(wrapped, "\n")
+}
+
+func (p diffPane) wrappedBodyParts(kind diff.Kind, body string, selected, inRange, syntaxOK bool, width int, intralineAgainst string) []string {
+	body = expandTabs(body)
+	intralineAgainst = expandTabs(intralineAgainst)
+	rendered := p.syntaxBodyView(kind, body, selected, inRange, syntaxOK)
+	plainParts := wrappedParts(body, width)
+	highlightStart, highlightEnd, bg, highlight := intralineHighlight(kind, body, intralineAgainst)
+	parts := make([]string, 0, len(plainParts))
+	pos := 0
+	for _, part := range plainParts {
+		idx := strings.Index(body[pos:], part)
+		if idx < 0 {
+			idx = 0
+		}
+		pos += idx
+		partStart := xansi.StringWidth(body[:pos])
+		pos += len(part)
+		partEnd := xansi.StringWidth(body[:pos])
+		renderedPart := ansiSlice(rendered, partStart, partEnd)
+		if highlight && highlightStart < partEnd && highlightEnd > partStart {
+			renderedPart = withANSIBackgroundSpan(renderedPart, max(0, highlightStart-partStart), min(partEnd, highlightEnd)-partStart, bg, baseBackground(selected, inRange))
+		}
+		parts = append(parts, renderedPart)
+	}
+	return parts
+}
+
+type sgrState struct {
+	bold bool
+	dim  bool
+	fg   string
+	bg   string
+}
+
+func (s sgrState) seq() string {
+	params := []string{}
+	if s.bold {
+		params = append(params, "1")
+	}
+	if s.dim {
+		params = append(params, "2")
+	}
+	if s.fg != "" {
+		params = append(params, "38", "5", s.fg)
+	}
+	if s.bg != "" {
+		params = append(params, "48", "5", s.bg)
+	}
+	if len(params) == 0 {
+		return ""
+	}
+	return "\x1b[" + strings.Join(params, ";") + "m"
+}
+
+func (s *sgrState) apply(seq string) {
+	if !strings.HasPrefix(seq, "\x1b[") || !strings.HasSuffix(seq, "m") {
+		return
+	}
+	body := strings.TrimSuffix(strings.TrimPrefix(seq, "\x1b["), "m")
+	if body == "" {
+		body = "0"
+	}
+	parts := strings.Split(body, ";")
+	for i := 0; i < len(parts); i++ {
+		switch parts[i] {
+		case "0":
+			*s = sgrState{}
+		case "1":
+			s.bold = true
+		case "2":
+			s.dim = true
+		case "22":
+			s.bold = false
+			s.dim = false
+		case "38":
+			if i+2 < len(parts) && parts[i+1] == "5" {
+				s.fg = parts[i+2]
+				i += 2
+			}
+		case "39":
+			s.fg = ""
+		case "48":
+			if i+2 < len(parts) && parts[i+1] == "5" {
+				s.bg = parts[i+2]
+				i += 2
+			}
+		case "49":
+			s.bg = ""
+		}
+	}
+}
+
+func ansiSlice(s string, start, end int) string {
+	if start >= end {
+		return ""
+	}
+	var state sgrState
+	var out strings.Builder
+	visible := 0
+	for i := 0; i < len(s); {
+		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
+			j := i + 2
+			for j < len(s) && (s[j] < 0x40 || s[j] > 0x7e) {
+				j++
+			}
+			if j < len(s) {
+				j++
+			}
+			seq := s[i:j]
+			state.apply(seq)
+			if visible >= start && visible < end {
+				out.WriteString(seq)
+			}
+			i = j
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if visible >= start && visible < end {
+			if out.Len() == 0 {
+				out.WriteString(state.seq())
+			}
+			out.WriteRune(r)
+		}
+		i += size
+		visible += xansi.StringWidth(string(r))
+		if visible >= end {
+			break
+		}
+	}
+	if out.Len() == 0 {
+		return ""
+	}
+	return out.String() + "\x1b[0m"
+}
+
+func expandTabs(s string) string {
+	return strings.ReplaceAll(s, "\t", "    ")
 }
 
 func wrapStyledPadded(s string, width int, textStyle, padStyle lipgloss.Style) string {
@@ -1157,24 +1292,31 @@ func (p diffPane) diffTextView(kind diff.Kind, s string, selected, inRange, synt
 }
 
 func (p diffPane) intralineTextView(kind diff.Kind, body, against string, selected, inRange, syntaxOK bool) string {
+	base := p.diffTextView(kind, body, selected, inRange, syntaxOK)
+	start, end, bg, ok := intralineHighlight(kind, body, against)
+	if !ok {
+		return base
+	}
+	return withANSIBackgroundSpan(base, start, end, bg, baseBackground(selected, inRange))
+}
+
+func intralineHighlight(kind diff.Kind, body, against string) (int, int, lipgloss.Color, bool) {
+	if against == "" || (kind != diff.Add && kind != diff.Delete) {
+		return 0, 0, "", false
+	}
 	start, end := changedSpan(body, against)
 	if start == end {
-		return p.diffTextView(kind, body, selected, inRange, syntaxOK)
+		return 0, 0, "", false
 	}
 	runes := []rune(body)
-	prefix := string(runes[:start])
-	changed := string(runes[start:end])
-	suffix := string(runes[end:])
-	if strings.TrimSpace(prefix) == "" && strings.TrimSpace(suffix) == "" {
-		return p.diffTextView(kind, body, selected, inRange, syntaxOK)
+	if strings.TrimSpace(string(runes[:start])) == "" && strings.TrimSpace(string(runes[end:])) == "" {
+		return 0, 0, "", false
 	}
 	bg := addChangedBg
 	if kind == diff.Delete {
 		bg = deleteChangedBg
 	}
-	return p.diffTextView(kind, prefix, selected, inRange, syntaxOK) +
-		withANSIBackground(p.diffTextView(kind, changed, false, false, syntaxOK), bg) +
-		p.diffTextView(kind, suffix, selected, inRange, syntaxOK)
+	return xansi.StringWidth(string(runes[:start])), xansi.StringWidth(string(runes[:end])), bg, true
 }
 
 func changedSpan(a, b string) (int, int) {
@@ -1188,7 +1330,24 @@ func changedSpan(a, b string) (int, int) {
 		endA--
 		endB--
 	}
-	return start, endA
+	return expandWordSpan(ar, start, endA)
+}
+
+func expandWordSpan(runes []rune, start, end int) (int, int) {
+	if start == end || len(runes) == 0 {
+		return start, end
+	}
+	for start > 0 && start < len(runes) && isWordRune(runes[start-1]) && isWordRune(runes[start]) {
+		start--
+	}
+	for end > start && end < len(runes) && isWordRune(runes[end-1]) && isWordRune(runes[end]) {
+		end++
+	}
+	return start, end
+}
+
+func isWordRune(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
 func (p diffPane) splitTextView(kind diff.Kind, side thread.Side, s string, selected, inRange, syntaxOK bool) string {
@@ -1244,8 +1403,72 @@ func withANSIBackground(s string, color lipgloss.Color) string {
 	if s == "" {
 		return s
 	}
-	bg := "\x1b[48;5;" + string(color) + "m"
+	bg := ansiBackground(color)
 	return bg + strings.ReplaceAll(s, "\x1b[0m", "\x1b[0m"+bg) + "\x1b[0m"
+}
+
+func withANSIBackgroundSpan(s string, start, end int, color lipgloss.Color, restore lipgloss.Color) string {
+	if s == "" || start >= end {
+		return s
+	}
+	highlight := ansiBackground(color)
+	restoreBg := ansiBackgroundOff()
+	if restore != "" {
+		restoreBg = ansiBackground(restore)
+	}
+	var out strings.Builder
+	out.Grow(len(s) + len(highlight) + len(restoreBg))
+	visible := 0
+	active := false
+	for i := 0; i < len(s); {
+		if !active && visible == start {
+			out.WriteString(highlight)
+			active = true
+		}
+		if s[i] == '\x1b' && i+1 < len(s) && s[i+1] == '[' {
+			j := i + 2
+			for j < len(s) && (s[j] < 0x40 || s[j] > 0x7e) {
+				j++
+			}
+			if j < len(s) {
+				j++
+			}
+			out.WriteString(s[i:j])
+			if active {
+				out.WriteString(highlight)
+			}
+			i = j
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		out.WriteRune(r)
+		i += size
+		visible += xansi.StringWidth(string(r))
+		if active && visible >= end {
+			out.WriteString(restoreBg)
+			active = false
+		}
+	}
+	if active {
+		out.WriteString(restoreBg)
+	}
+	return out.String()
+}
+
+func ansiBackground(color lipgloss.Color) string {
+	return "\x1b[48;5;" + string(color) + "m"
+}
+
+func ansiBackgroundOff() string { return "\x1b[49m" }
+
+func baseBackground(selected, inRange bool) lipgloss.Color {
+	if selected {
+		return selectedBg
+	}
+	if inRange {
+		return rangeBg
+	}
+	return ""
 }
 
 func diffTextColor(kind diff.Kind, s string, selected, inRange bool) string {

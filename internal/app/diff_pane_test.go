@@ -505,6 +505,43 @@ func TestDiffPaneWrapsSelectedFullWidthSplitLine(t *testing.T) {
 	}
 }
 
+func TestSelectedWrappedSyntaxIntralineFixture(t *testing.T) {
+	raw := wrappedSyntaxIntralineFixture()
+	plain := xansi.Strip(raw)
+	if !strings.Contains(plain, "changed") || !strings.Contains(plain, "eleven") {
+		t.Fatalf("wrapped fixture lost text:\n%s", plain)
+	}
+	if !strings.Contains(raw, "38;5;") {
+		t.Fatalf("wrapped fixture missing syntax highlighting:\n%s", visibleANSI(raw))
+	}
+	if !strings.Contains(raw, "48;5;"+string(addChangedBg)) {
+		t.Fatalf("wrapped fixture missing intraline highlight:\n%s", visibleANSI(raw))
+	}
+}
+
+func wrappedSyntaxIntralineFixture() string {
+	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@", Lines: []diff.Line{
+		{Kind: diff.Delete, OldNo: 1, Text: `-const message = "one two three four five six seven old nine ten eleven"`},
+		{Kind: diff.Add, NewNo: 1, Text: `+const message = "one two three four five six seven changed nine ten eleven"`},
+	}}}}
+	store := &thread.Store{}
+	m := Model{
+		store:          store,
+		threads:        threadworkflow.NewWorkflow(store),
+		session:        review.NewSession([]diff.File{file}),
+		wrapCursorLine: true,
+		width:          44,
+		syntax:         true,
+		syntaxCache:    make(map[string]string),
+	}
+	m.session.JumpToIndex(0, 2, 10)
+	return m.diffPane(32).Render(10)
+}
+
+func visibleANSI(s string) string {
+	return strings.ReplaceAll(s, "\x1b", "␛")
+}
+
 func TestDiffPaneWrapsSelectedUnifiedLineWithSyntaxOn(t *testing.T) {
 	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: []diff.Line{
 		{Kind: diff.Add, NewNo: 1, Text: "+func example() { return one + two + three + four + five + six + seven + eight }"},
@@ -528,6 +565,89 @@ func TestDiffPaneWrapsSelectedUnifiedLineWithSyntaxOn(t *testing.T) {
 	}
 	if !strings.Contains(raw, "\x1b[38;5;") {
 		t.Fatalf("selected wrapped syntax unified line missing syntax highlighting:\n%q", raw)
+	}
+}
+
+func TestWrapSelectedBodyKeepsIntralineHighlight(t *testing.T) {
+	pane := diffPane{width: 18, syntax: true, path: "foo.go", syntaxCache: make(map[string]string)}
+	raw := pane.wrapSelectedBody("", diff.Add, "func example() int { return changed }", true, false, true, 12, "func example() int { return old }")
+	if !strings.Contains(raw, "48;5;"+string(addChangedBg)) {
+		t.Fatalf("wrapped intraline highlight missing:\n%q", raw)
+	}
+	if !strings.Contains(raw, "38;5;") {
+		t.Fatalf("wrapped syntax highlighting missing:\n%q", raw)
+	}
+	if strings.Contains(xansi.Strip(raw), "…") || !strings.Contains(xansi.Strip(raw), "changed") {
+		t.Fatalf("wrapped body lost text:\n%s", xansi.Strip(raw))
+	}
+}
+
+func TestDiffPaneWrapsSelectedSyntaxLineWithoutBlankRows(t *testing.T) {
+	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@", Lines: []diff.Line{
+		{Kind: diff.Add, NewNo: 1, Text: "+\tmeta := fmt.Sprintf(\"width=%d diff_width=%d height=%d split=%t syntax=%t wrap=%t file=%s line_index=%d\\n\", m.width, m.diffWidth(), m.height, m.split, m.syntax, m.wrapCursorLine, m.currentPath(), m.session.LineIndex())"},
+	}}}}
+	store := &thread.Store{}
+	m := Model{store: store, threads: threadworkflow.NewWorkflow(store), session: review.NewSession([]diff.File{file}), width: 96, hideSidebar: false, wrapCursorLine: true, syntax: true, syntaxCache: make(map[string]string)}
+	m.session.JumpToIndex(0, 1, 10)
+	plain := xansi.Strip(m.renderDiff(10))
+	if strings.Contains(plain, "diff_   \n                                                        \n") {
+		t.Fatalf("wrapped syntax line contains blank row:\n%s", plain)
+	}
+	for _, want := range []string{"meta := fmt.Sprintf", "width=%d height", "m.diffWidth()"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("wrapped syntax line missing %q:\n%s", want, plain)
+		}
+	}
+}
+
+func TestDiffPaneWrapsSelectedTabbedSyntaxLineWithoutPostWrap(t *testing.T) {
+	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@", Lines: []diff.Line{
+		{Kind: diff.Context, OldNo: 1, NewNo: 1, Text: " \t\tlinePrefix := railCell(railGlyph(marker, rangeGlyph), true, inRange) + selectedStyle.Render(\" \") + rest + diffSignView(diffSign, kind, true, inRange)"},
+	}}}}
+	store := &thread.Store{}
+	m := Model{store: store, threads: threadworkflow.NewWorkflow(store), session: review.NewSession([]diff.File{file}), width: 96, hideSidebar: false, wrapCursorLine: true, syntax: true, syntaxCache: make(map[string]string)}
+	m.session.JumpToIndex(0, 1, 10)
+	plain := xansi.Strip(m.renderDiff(10))
+	if strings.Contains(plain, "\narker,") || strings.Contains(plain, "\t") {
+		t.Fatalf("tabbed wrapped syntax line post-wrapped:\n%s", plain)
+	}
+	if !strings.Contains(plain, "linePrefix :=") || !strings.Contains(plain, "marker,") {
+		t.Fatalf("tabbed wrapped syntax line lost text:\n%s", plain)
+	}
+}
+
+func TestWrapSelectedBodyDoesNotEmbedExtraNewlines(t *testing.T) {
+	pane := diffPane{width: 56, syntax: true, path: "foo.go", syntaxCache: make(map[string]string)}
+	prefix := selectedStyle.Render("              ")
+	raw := pane.wrapSelectedBody(prefix, diff.Add, `return p.wrapSelectedBody(linePrefix, kind, body, true, inRange, syntaxOK, bodyW, "")`, true, false, true, 40, `return p.wrapSelectedBody(linePrefix, kind, body, true, inRange, syntaxOK, bodyW)`)
+	for _, line := range strings.Split(raw, "\n") {
+		if xansi.StringWidth(line) > pane.width {
+			t.Fatalf("wrapped line too wide (%d):\n%s", xansi.StringWidth(line), visibleANSI(raw))
+		}
+	}
+	if got := strings.Count(raw, "\n") + 1; got != len(strings.Split(xansi.Strip(raw), "\n")) {
+		t.Fatalf("embedded newlines in ANSI parts:\n%s", visibleANSI(raw))
+	}
+}
+
+func TestWrappedBodyPartsAppliesHighlightAfterWrapping(t *testing.T) {
+	pane := diffPane{width: 20, syntax: true, path: "foo.go", syntaxCache: make(map[string]string)}
+	parts := pane.wrappedBodyParts(diff.Add, "seven changed nine", true, false, true, 20, "seven old nine")
+	got := strings.Join(parts, "\n")
+	visible := visibleANSI(got)
+	if !strings.Contains(visible, "48;5;"+string(addChangedBg)+"m") || !strings.Contains(xansi.Strip(got), "changed") {
+		t.Fatalf("highlight not applied after wrapping:\n%s", visible)
+	}
+}
+
+func TestANSIBackgroundSpanPreservesForeground(t *testing.T) {
+	base := "\x1b[38;5;209mabcdef\x1b[0m"
+	got := withANSIBackgroundSpan(base, 2, 4, addChangedBg, "")
+	if xansi.Strip(got) != "abcdef" {
+		t.Fatalf("span changed text: %q", got)
+	}
+	if !strings.Contains(got, "38;5;209m") || !strings.Contains(got, "48;5;"+string(addChangedBg)) {
+		t.Fatalf("span lost foreground or background: %q", got)
 	}
 }
 

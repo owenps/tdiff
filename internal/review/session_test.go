@@ -36,14 +36,15 @@ func (s *fakeViewedStore) IsViewed(path, diffHash string) bool {
 
 func TestSessionFiltersSnapshotFiles(t *testing.T) {
 	s := NewSession(nil)
-	viewed := &fakeViewedStore{viewed: map[string]string{"a.go": "hash"}}
+	files := []diff.File{{NewPath: "a.go"}, {NewPath: "b.go"}, {NewPath: "c.go"}}
+	viewed := &fakeViewedStore{viewed: map[string]string{"a.go": diff.FileHash(files[0])}}
 	s.SetStores(viewed, fakeThreadStore{"b.go": []thread.Thread{{Path: "b.go", Side: thread.SideNew, LineStart: 1, LineEnd: 1}}})
-	s.SetSnapshot([]diff.File{{NewPath: "a.go"}, {NewPath: "b.go"}, {NewPath: "c.go"}}, "hash")
+	s.SetSnapshot(files, "hash")
 	s.SetFilters(true, true)
 
-	files := s.Files()
-	if len(files) != 1 || files[0].Path() != "b.go" {
-		t.Fatalf("files=%+v", files)
+	filtered := s.Files()
+	if len(filtered) != 1 || filtered[0].Path() != "b.go" {
+		t.Fatalf("files=%+v", filtered)
 	}
 	if len(s.AllFiles()) != 3 || s.DiffHash() != "hash" {
 		t.Fatalf("all=%d hash=%q", len(s.AllFiles()), s.DiffHash())
@@ -51,9 +52,10 @@ func TestSessionFiltersSnapshotFiles(t *testing.T) {
 }
 
 func TestSessionAdvanceToNextUnviewed(t *testing.T) {
-	s := NewSession([]diff.File{{NewPath: "a.go"}, {NewPath: "b.go"}})
+	files := []diff.File{{NewPath: "a.go"}, {NewPath: "b.go"}}
+	s := NewSession(files)
 	s.SetSnapshot(s.AllFiles(), "hash")
-	s.SetStores(&fakeViewedStore{viewed: map[string]string{"a.go": "hash"}}, nil)
+	s.SetStores(&fakeViewedStore{viewed: map[string]string{"a.go": diff.FileHash(files[0])}}, nil)
 
 	if !s.AdvanceToNextUnviewed() || s.CurrentPath() != "b.go" {
 		t.Fatalf("path=%q", s.CurrentPath())
@@ -93,7 +95,8 @@ func TestSessionSelectedThreadUsesStore(t *testing.T) {
 
 func TestSessionToggleViewedOwnsFilteringAndAdvance(t *testing.T) {
 	store := &fakeViewedStore{}
-	s := NewSession([]diff.File{{NewPath: "a.go"}, {NewPath: "b.go"}})
+	files := []diff.File{{NewPath: "a.go"}, {NewPath: "b.go"}}
+	s := NewSession(files)
 	s.SetStores(store, nil)
 	s.SetSnapshot(s.AllFiles(), "hash")
 
@@ -101,8 +104,8 @@ func TestSessionToggleViewedOwnsFilteringAndAdvance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Viewed || !result.Advanced || s.CurrentPath() != "b.go" || !store.IsViewed("a.go", "hash") {
-		t.Fatalf("result=%+v path=%q viewed=%v", result, s.CurrentPath(), store.IsViewed("a.go", "hash"))
+	if !result.Viewed || !result.Advanced || s.CurrentPath() != "b.go" || !store.IsViewed("a.go", diff.FileHash(files[0])) {
+		t.Fatalf("result=%+v path=%q viewed=%v", result, s.CurrentPath(), store.IsViewed("a.go", diff.FileHash(files[0])))
 	}
 
 	s.ToggleHideViewed()
@@ -110,7 +113,31 @@ func TestSessionToggleViewedOwnsFilteringAndAdvance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.Viewed || len(s.Files()) != 0 || !store.IsViewed("b.go", "hash") {
-		t.Fatalf("result=%+v files=%d viewed=%v", result, len(s.Files()), store.IsViewed("b.go", "hash"))
+	if !result.Viewed || len(s.Files()) != 0 || !store.IsViewed("b.go", diff.FileHash(files[1])) {
+		t.Fatalf("result=%+v files=%d viewed=%v", result, len(s.Files()), store.IsViewed("b.go", diff.FileHash(files[1])))
+	}
+}
+
+func TestSessionViewedUsesPerFileHash(t *testing.T) {
+	store := &fakeViewedStore{}
+	a := diff.File{NewPath: "a.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+a"}}}}}
+	b := diff.File{NewPath: "b.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+b"}}}}}
+
+	s := NewSession([]diff.File{a})
+	s.SetStores(store, nil)
+	s.SetSnapshot([]diff.File{a}, "snapshot-1")
+	if _, err := s.ToggleViewed(); err != nil {
+		t.Fatal(err)
+	}
+
+	s.SetSnapshot([]diff.File{a, b}, "snapshot-2")
+	if !s.IsViewed("a.go") {
+		t.Fatal("unchanged file lost viewed mark after unrelated file changed")
+	}
+
+	changedA := diff.File{NewPath: "a.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+changed"}}}}}
+	s.SetSnapshot([]diff.File{changedA, b}, "snapshot-3")
+	if s.IsViewed("a.go") {
+		t.Fatal("changed file stayed viewed")
 	}
 }

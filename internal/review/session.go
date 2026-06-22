@@ -124,6 +124,7 @@ func (s *Session) applyFilters() {
 		HideViewed:  s.hideViewed,
 		ThreadsOnly: s.threadsOnly,
 		DiffHash:    s.diffHash,
+		FileHash:    diff.FileHash,
 		IsViewed:    isViewed,
 		ThreadCount: threadCount,
 	})
@@ -216,7 +217,16 @@ func (s *Session) AdvanceToNextFile(matches func(diff.File) bool) bool {
 	return s.cursor.AdvanceToNextFile(matches)
 }
 func (s Session) IsViewed(path string) bool {
-	return s.viewed != nil && s.viewed.IsViewed(path, s.diffHash)
+	return s.viewed != nil && s.viewed.IsViewed(path, s.viewedHashForPath(path))
+}
+
+func (s Session) viewedHashForPath(path string) string {
+	for _, f := range s.allFiles {
+		if f.Path() == path {
+			return diff.FileHash(f)
+		}
+	}
+	return s.diffHash
 }
 
 func (s Session) ThreadCount(path string) int {
@@ -234,14 +244,15 @@ func (s *Session) ToggleViewed() (ViewedToggleResult, error) {
 	if s.viewed == nil {
 		return ViewedToggleResult{}, fmt.Errorf("viewed store not configured")
 	}
-	if s.viewed.IsViewed(path, s.diffHash) {
+	viewedHash := s.viewedHashForPath(path)
+	if s.viewed.IsViewed(path, viewedHash) {
 		if err := s.viewed.ClearViewed(path); err != nil {
 			return ViewedToggleResult{}, err
 		}
 		s.applyFilters()
 		return ViewedToggleResult{Path: path}, nil
 	}
-	if err := s.viewed.MarkViewed(path, s.diffHash); err != nil {
+	if err := s.viewed.MarkViewed(path, viewedHash); err != nil {
 		return ViewedToggleResult{}, err
 	}
 	result := ViewedToggleResult{Path: path, Viewed: true}
@@ -254,8 +265,8 @@ func (s *Session) ToggleViewed() (ViewedToggleResult, error) {
 }
 
 func (s *Session) AdvanceToNextUnviewed() bool {
-	return s.cursor.AdvanceToNextUnviewed(s.diffHash, func(path, diffHash string) bool {
-		return s.viewed != nil && s.viewed.IsViewed(path, diffHash)
+	return s.cursor.AdvanceToNextFile(func(f diff.File) bool {
+		return s.viewed == nil || !s.viewed.IsViewed(f.Path(), diff.FileHash(f))
 	})
 }
 func (s Session) ThreadPositions() []ThreadPosition {

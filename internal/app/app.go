@@ -533,10 +533,7 @@ func threadBadgeView(count, unread int) string {
 	if text == "" {
 		return ""
 	}
-	if unread > 0 {
-		return threadStyle.Render(text)
-	}
-	return dimStyle.Render(text)
+	return threadStyle.Render(text)
 }
 
 func sidebarHeader(stats, threads string) string {
@@ -572,7 +569,7 @@ func sidebarThreadView(badge string, width int) string {
 	if badge != "" {
 		thread = fmt.Sprintf("%*s", width, badge)
 	}
-	if strings.HasPrefix(badge, "●") {
+	if badge != "" {
 		return threadStyle.Render(thread)
 	}
 	return dimStyle.Render(thread)

@@ -43,6 +43,7 @@ type FileFilter struct {
 	HideViewed  bool
 	ThreadsOnly bool
 	DiffHash    string
+	FileHash    func(diff.File) string
 	IsViewed    func(path, diffHash string) bool
 	ThreadCount func(path string) int
 }
@@ -55,7 +56,11 @@ func FilterFiles(files []diff.File, filter FileFilter) []diff.File {
 	filtered := make([]diff.File, 0, len(files))
 	for _, f := range files {
 		path := f.Path()
-		if filter.HideViewed && filter.IsViewed != nil && filter.IsViewed(path, filter.DiffHash) {
+		viewedHash := filter.DiffHash
+		if filter.FileHash != nil {
+			viewedHash = filter.FileHash(f)
+		}
+		if filter.HideViewed && filter.IsViewed != nil && filter.IsViewed(path, viewedHash) {
 			continue
 		}
 		if filter.ThreadsOnly && filter.ThreadCount != nil && filter.ThreadCount(path) == 0 {

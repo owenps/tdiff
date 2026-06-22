@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -59,6 +60,16 @@ type reviewContext struct {
 	Threads []threadView        `json:"threads"`
 }
 
+type agentInbox struct {
+	Review  reviewSummary    `json:"review"`
+	Threads []agentInboxItem `json:"threads"`
+}
+
+type agentInboxItem struct {
+	Thread      threadView `json:"thread"`
+	BodyPreview string     `json:"body_preview"`
+}
+
 type fileSummary struct {
 	Path      string `json:"path"`
 	HunkCount int    `json:"hunk_count"`
@@ -91,6 +102,9 @@ func runAgent(args []string) error {
 		fmt.Print(agentHelpText())
 		return nil
 	}
+	if args[0] == "inbox" {
+		return runAgentInbox(context.Background(), args[1:])
+	}
 	return fmt.Errorf("unknown agent command %q", args[0])
 }
 
@@ -101,13 +115,14 @@ Usage:
   tdiff [--base <ref>] [--staged|--unstaged] [--offline]
   tdiff review status|context|approve|unapprove|watch|events
   tdiff thread list|show|add|reply|resolve|reopen
-  tdiff agent help
+  tdiff agent help|inbox [limit]
 
 Agent quick start:
-  tdiff agent help      # instructions for coding agents watching review comments
+  tdiff agent inbox     # current open review threads for agents
   tdiff review watch    # compact text event stream; add --json for JSONL
 
 Common commands:
+  tdiff agent inbox 5 --json
   tdiff review context --json
   tdiff thread show <id> --json
   tdiff thread reply <id> --actor agent --body "Fixed; added test"
@@ -124,23 +139,24 @@ Purpose:
 
 Workflow:
   1. Ask human to run: tdiff
-  2. Watch comments/events: tdiff review watch
-  3. On thread.created or thread.replied, inspect if needed:
+  2. Read current work: tdiff agent inbox --json
+  3. Watch notifications if waiting: tdiff review watch
+  4. Inspect detail if needed:
        tdiff thread show <thread_id> --json
        tdiff review context --json
-  4. Fix code, run relevant checks.
-  5. Reply in the same thread:
+  5. Fix code, run relevant checks.
+  6. Reply in the same thread:
        tdiff thread reply <thread_id> --actor agent --body "Fixed; ran go test ./..."
-  6. Resolve only when clearly handled:
+  7. Resolve only when clearly handled:
        tdiff thread resolve <thread_id> --actor agent
-  7. Stop when review.approved appears for the current diff.
+  8. Stop when review.approved appears for the current diff.
 
 Event stream:
   tdiff review watch emits compact text with explicit keys, for example:
     E1 thread.created thread_id=T1 actor=human path="internal/foo.go" line_start=3 body_preview="Handle nil repo"
 
 Rules:
-  - Treat open current human threads as work items.
+  - Treat tdiff agent inbox as the work queue.
   - Treat events as notifications; use thread/context JSON for source of truth.
   - Do not ask user to copy/paste comments; read tdiff directly.
   - Do not approve unless explicitly asked by user.
@@ -151,6 +167,68 @@ JSON options:
   tdiff review events --json
 
 `
+}
+
+func runAgentInbox(ctx context.Context, args []string) error {
+	positionalLimit, args, err := extractAgentInboxLimit(args)
+	if err != nil {
+		return err
+	}
+	dfs := newDiffFlagSet("tdiff agent inbox")
+	limitFlag := dfs.fs.Int("limit", 0, "max threads to return")
+	jsonOut := dfs.fs.Bool("json", false, "emit JSON")
+	if err := dfs.fs.Parse(args); err != nil {
+		return err
+	}
+	if dfs.fs.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", dfs.fs.Arg(0))
+	}
+	limit := *limitFlag
+	if positionalLimit > 0 {
+		limit = positionalLimit
+	}
+	loaded, err := loadReview(ctx, dfs.opts())
+	if err != nil {
+		return err
+	}
+	index := buildAgentInbox(loaded.store, loaded.snap, limit)
+	if *jsonOut {
+		return writeJSON(index)
+	}
+	for _, item := range index.Threads {
+		t := item.Thread
+		fmt.Printf("%s %s:%d actor=%s replies=%d %s\n", t.ID, t.Path, t.LineStart, t.LastActor, threadReplyCount(t.Thread), item.BodyPreview)
+	}
+	return nil
+}
+
+func extractAgentInboxLimit(args []string) (int, []string, error) {
+	limit := 0
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, "-") {
+			out = append(out, arg)
+			if (arg == "--base" || arg == "-base" || arg == "--limit" || arg == "-limit") && i+1 < len(args) {
+				i++
+				out = append(out, args[i])
+			}
+			continue
+		}
+		parsed, err := strconv.Atoi(arg)
+		if err != nil {
+			out = append(out, arg)
+			continue
+		}
+		if parsed < 0 {
+			return 0, nil, fmt.Errorf("invalid limit %q", arg)
+		}
+		if limit != 0 {
+			return 0, nil, fmt.Errorf("multiple limits provided")
+		}
+		limit = parsed
+	}
+	return limit, out, nil
 }
 
 func runTUI(ctx context.Context, args []string) error {
@@ -522,6 +600,43 @@ func buildReviewContext(store *thread.Store, snap snapshot.Snapshot) reviewConte
 		files = append(files, fileSummary{Path: f.Path(), HunkCount: len(f.Hunks)})
 	}
 	return reviewContext{Review: summarizeReview(store, snap), GitHub: store.GitHub, Viewed: store.Viewed, Files: files, Threads: threadViews(store.Threads, snap.Files)}
+}
+
+func buildAgentInbox(store *thread.Store, snap snapshot.Snapshot, limit int) agentInbox {
+	items := make([]agentInboxItem, 0, len(store.Threads))
+	for _, t := range store.Threads {
+		if t.Status == thread.StatusResolved || !isThreadCurrent(t, snap.Files) {
+			continue
+		}
+		view := threadView{Thread: t, Freshness: freshness(t, snap.Files), LastActor: thread.LastActor(t)}
+		items = append(items, agentInboxItem{Thread: view, BodyPreview: eventBodyPreview(thread.Body(t))})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		left, right := items[i].Thread, items[j].Thread
+		if agentActorRank(left.LastActor) != agentActorRank(right.LastActor) {
+			return agentActorRank(left.LastActor) < agentActorRank(right.LastActor)
+		}
+		return left.UpdatedAt.After(right.UpdatedAt)
+	})
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	return agentInbox{Review: summarizeReview(store, snap), Threads: items}
+}
+
+func agentActorRank(actor thread.Actor) int {
+	switch actor {
+	case thread.ActorHuman, thread.ActorGitHub:
+		return 0
+	case thread.ActorAgent:
+		return 2
+	default:
+		return 1
+	}
+}
+
+func threadReplyCount(t thread.Thread) int {
+	return max(0, len(t.Messages)-1)
 }
 
 func threadViews(threads []thread.Thread, files []diff.File) []threadView {

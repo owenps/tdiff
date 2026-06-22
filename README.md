@@ -48,8 +48,8 @@ Use tdiff for review comments. Run `tdiff agent help`, then wait for my tdiff re
 Agent loop:
 
 ```sh
+tdiff agent inbox --json
 tdiff review watch
-tdiff review context --json
 tdiff thread reply T123 --actor agent --body "Fixed; added test"
 ```
 
@@ -64,6 +64,8 @@ tdiff --unstaged
 tdiff --offline
 
 tdiff agent help
+tdiff agent inbox --json
+tdiff agent inbox 5 --json
 
 # agent/review API
 tdiff review status --json

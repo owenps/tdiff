@@ -18,11 +18,7 @@ import (
 	"github.com/owenps/tdiff/internal/threadtarget"
 )
 
-const (
-	inlineThreadMinScreenRows = 8
-	inlineThreadMinRows       = 4
-	inlineThreadMaxRows       = 8
-)
+const inlineThreadMinScreenRows = 8
 
 type threadMarkers map[thread.Side]map[int]string
 
@@ -428,15 +424,13 @@ func (p diffPane) inlineThreadCards(height int) map[int][]string {
 	if !p.inlineThreads || height < inlineThreadMinScreenRows || p.width < 24 {
 		return nil
 	}
-	maxRows := min(inlineThreadMaxRows, max(inlineThreadMinRows, height/4))
-	maxRows = min(maxRows, max(0, height-1))
 	cards := make(map[int][]string)
 	for _, t := range p.threads {
 		anchor := p.threadAnchorIndex(t)
 		if anchor < 0 {
 			continue
 		}
-		rows := p.threadCardRows(t, maxRows)
+		rows := p.threadCardRows(t)
 		if len(rows) > 0 {
 			cards[anchor] = append(cards[anchor], rows...)
 		}
@@ -445,7 +439,11 @@ func (p diffPane) inlineThreadCards(height int) map[int][]string {
 }
 
 func lineVisualRows(lineCount int, cards map[int][]string) []lineVisualRow {
-	rows := make([]lineVisualRow, 0, lineCount+len(cards)*inlineThreadMinRows)
+	capacity := lineCount
+	for _, cardRows := range cards {
+		capacity += len(cardRows)
+	}
+	rows := make([]lineVisualRow, 0, capacity)
 	for i := 0; i < lineCount; i++ {
 		rows = append(rows, lineVisualRow{lineIdx: i})
 		for _, card := range cards[i] {
@@ -456,7 +454,11 @@ func lineVisualRows(lineCount int, cards map[int][]string) []lineVisualRow {
 }
 
 func splitVisualRows(rowCount int, cards map[int][]string) []splitVisualRow {
-	rows := make([]splitVisualRow, 0, rowCount+len(cards)*inlineThreadMinRows)
+	capacity := rowCount
+	for _, cardRows := range cards {
+		capacity += len(cardRows)
+	}
+	rows := make([]splitVisualRow, 0, capacity)
 	for i := 0; i < rowCount; i++ {
 		rows = append(rows, splitVisualRow{rowIdx: i})
 		for _, card := range cards[i] {
@@ -584,16 +586,15 @@ func (p diffPane) threadAnchorIndex(t thread.Thread) int {
 	return anchor
 }
 
-func (p diffPane) threadCardRows(t thread.Thread, maxRows int) []string {
-	if maxRows < 3 || p.width < 10 {
+func (p diffPane) threadCardRows(t thread.Thread) []string {
+	if p.width < 10 {
 		return nil
 	}
 	cardW := max(10, p.width-2)
-	bodyRows := maxRows - 2
+	innerW := max(1, cardW-4)
 	rows := []string{threadStyle.Render(p.threadCardBorder("╭", p.threadCardTitle(t), "╮", cardW))}
-	messages := inlineThreadMessages(t.Messages, bodyRows)
-	for _, msg := range messages {
-		rows = append(rows, dimStyle.Render(p.threadCardBody(msg, cardW)))
+	for _, msg := range inlineThreadRows(t.Messages, innerW) {
+		rows = append(rows, p.threadCardBody(msg, cardW))
 	}
 	rows = append(rows, threadStyle.Render(p.threadCardBorder("╰", "", "╯", cardW)))
 	return rows
@@ -635,35 +636,183 @@ func (p diffPane) threadCardBorder(left, text, right string, width int) string {
 
 func (p diffPane) threadCardBody(text string, width int) string {
 	innerW := max(0, width-4)
-	body := truncate(text, innerW)
-	return "  │ " + body + strings.Repeat(" ", max(0, innerW-xansi.StringWidth(body))) + " │"
+	body := text
+	if xansi.StringWidth(body) > innerW {
+		body = truncate(body, innerW)
+	}
+	pad := strings.Repeat(" ", max(0, innerW-xansi.StringWidth(body)))
+	return dimStyle.Render("  │ ") + body + dimStyle.Render(pad+" │")
 }
 
-func inlineThreadMessages(messages []thread.Message, maxRows int) []string {
-	if maxRows <= 0 {
+func inlineThreadRows(messages []thread.Message, width int) []string {
+	if width <= 0 {
 		return nil
 	}
 	if len(messages) == 0 {
-		return []string{"no messages"}
+		return []string{dimStyle.Render("no messages")}
 	}
-	start := 0
-	out := make([]string, 0, maxRows)
-	if len(messages) > maxRows {
-		start = len(messages) - maxRows + 1
-		out = append(out, fmt.Sprintf("… %d older", start))
-	}
-	for _, msg := range messages[start:] {
-		out = append(out, inlineThreadMessageText(msg))
+	out := []string{}
+	for i, msg := range messages {
+		if i > 0 {
+			out = append(out, "")
+		}
+		out = append(out, inlineThreadMessageRows(msg, width)...)
 	}
 	return out
 }
 
-func inlineThreadMessageText(msg thread.Message) string {
-	body := strings.ReplaceAll(strings.TrimSpace(msg.Body), "\n", " ")
-	if author := inlineThreadMessageAuthor(msg); author != "" {
-		return author + "  " + body
+func inlineThreadMessageRows(msg thread.Message, width int) []string {
+	bodyRows := inlineThreadMarkdownLines(msg.Body)
+	if len(bodyRows) == 0 {
+		bodyRows = []string{""}
 	}
-	return body
+	author := inlineThreadMessageAuthor(msg)
+	if author == "" {
+		return wrapInlineThreadRows(bodyRows, width, "", "")
+	}
+	prefix := threadStyle.Render(author) + dimStyle.Render("  ")
+	indent := strings.Repeat(" ", xansi.StringWidth(author)+2)
+	return wrapInlineThreadRows(bodyRows, width, prefix, indent)
+}
+
+func wrapInlineThreadRows(rows []string, width int, firstPrefix, nextPrefix string) []string {
+	out := []string{}
+	for i, row := range rows {
+		prefix := nextPrefix
+		if i == 0 {
+			prefix = firstPrefix
+		}
+		lineW := max(1, width-xansi.StringWidth(prefix))
+		wrapped := wrappedANSIParts(row, lineW)
+		for j, part := range wrapped {
+			linePrefix := prefix
+			if j > 0 {
+				linePrefix = nextPrefix
+			}
+			out = append(out, linePrefix+part)
+		}
+	}
+	return out
+}
+
+func inlineThreadMarkdownLines(body string) []string {
+	body = strings.ReplaceAll(strings.TrimSpace(body), "\r\n", "\n")
+	body = strings.ReplaceAll(body, "\r", "")
+	if body == "" {
+		return []string{""}
+	}
+	lines := strings.Split(body, "\n")
+	out := make([]string, 0, len(lines))
+	inFence := false
+	for _, raw := range lines {
+		line := expandTabs(strings.TrimRight(raw, " \t"))
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "```") {
+			out = append(out, markdownCodeBlockStyle.Render(trimmed))
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			out = append(out, markdownCodeBlockStyle.Render(line))
+			continue
+		}
+		if trimmed == "" {
+			out = append(out, "")
+			continue
+		}
+		if heading, ok := markdownHeading(line); ok {
+			out = append(out, markdownStrongStyle.Render(markdownInline(heading)))
+			continue
+		}
+		if quote, ok := markdownQuote(line); ok {
+			out = append(out, markdownQuoteStyle.Render("┃ ")+markdownInline(quote))
+			continue
+		}
+		out = append(out, markdownInline(line))
+	}
+	return out
+}
+
+func markdownHeading(line string) (string, bool) {
+	trimmed := strings.TrimLeft(line, " ")
+	level := 0
+	for level < len(trimmed) && level < 6 && trimmed[level] == '#' {
+		level++
+	}
+	if level == 0 || level >= len(trimmed) || trimmed[level] != ' ' {
+		return "", false
+	}
+	text := strings.TrimSpace(trimmed[level+1:])
+	return text, text != ""
+}
+
+func markdownQuote(line string) (string, bool) {
+	trimmed := strings.TrimLeft(line, " ")
+	if !strings.HasPrefix(trimmed, ">") {
+		return "", false
+	}
+	return strings.TrimSpace(strings.TrimPrefix(trimmed, ">")), true
+}
+
+func markdownInline(s string) string {
+	var out strings.Builder
+	for i := 0; i < len(s); {
+		if strings.HasPrefix(s[i:], "**") {
+			if end := strings.Index(s[i+2:], "**"); end >= 0 {
+				text := s[i+2 : i+2+end]
+				out.WriteString(markdownStrongStyle.Render(text))
+				i += 2 + end + 2
+				continue
+			}
+		}
+		if s[i] == '`' {
+			if end := strings.IndexByte(s[i+1:], '`'); end >= 0 {
+				text := s[i+1 : i+1+end]
+				out.WriteString(markdownInlineCodeStyle.Render(text))
+				i += 1 + end + 1
+				continue
+			}
+		}
+		if s[i] == '[' {
+			if label, url, n, ok := markdownLink(s[i:]); ok {
+				out.WriteString(markdownLinkStyle.Render(label))
+				if url != "" {
+					out.WriteString(dimStyle.Render(" (" + url + ")"))
+				}
+				i += n
+				continue
+			}
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		out.WriteRune(r)
+		i += size
+	}
+	return out.String()
+}
+
+func markdownLink(s string) (label, url string, consumed int, ok bool) {
+	labelEnd := strings.Index(s, "](")
+	if labelEnd <= 0 {
+		return "", "", 0, false
+	}
+	urlStart := labelEnd + 2
+	urlEnd := strings.IndexByte(s[urlStart:], ')')
+	if urlEnd < 0 {
+		return "", "", 0, false
+	}
+	urlEnd += urlStart
+	return s[1:labelEnd], s[urlStart:urlEnd], urlEnd + 1, true
+}
+
+func wrappedANSIParts(s string, width int) []string {
+	if width <= 0 {
+		return []string{""}
+	}
+	wrapped := strings.TrimSuffix(xansi.Wrap(s, width, " /._-"), "\n")
+	if wrapped == "" {
+		return []string{""}
+	}
+	return strings.Split(wrapped, "\n")
 }
 
 func inlineThreadMessageAuthor(msg thread.Message) string {

@@ -77,6 +77,41 @@ func TestDiffPaneRendersThreadsInlineByDefault(t *testing.T) {
 	}
 }
 
+func TestDiffPaneRendersInlineThreadMultilineRepliesFull(t *testing.T) {
+	m := diffPaneTestModel(false)
+	m.width = 100
+	m.store.Threads[0].Messages = []thread.Message{
+		{Actor: thread.ActorHuman, Body: "first line\nsecond line\nthird line"},
+		{Actor: thread.ActorAgent, Body: "reply line\nextra detail"},
+		{Actor: thread.ActorHuman, Body: "final line"},
+	}
+	m.session.SetStores(m.store, m.store)
+
+	out := xansi.Strip(m.renderDiff(16))
+	for _, want := range []string{"you  first line", "second line", "third line", "agent  reply line", "extra detail", "final line"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("inline thread missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "…") || strings.Contains(out, "older") {
+		t.Fatalf("inline thread unexpectedly compacted:\n%s", out)
+	}
+}
+
+func TestDiffPaneRendersInlineThreadMarkdown(t *testing.T) {
+	m := diffPaneTestModel(false)
+	m.width = 100
+	m.store.Threads[0].Messages = []thread.Message{{Actor: thread.ActorHuman, Body: "# Heading\n\n> quote\n- item `ctx`\n[docs](https://example.test)"}}
+	m.session.SetStores(m.store, m.store)
+
+	out := xansi.Strip(m.renderDiff(12))
+	for _, want := range []string{"Heading", "┃ quote", "- item ctx", "docs (https://example.test)"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("inline markdown missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestDiffPaneHidesInlineThreads(t *testing.T) {
 	m := diffPaneTestModel(false)
 	m.width = 100

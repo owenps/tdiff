@@ -59,6 +59,7 @@ func (m *Model) handlePRAttachLoaded(msg prAttachLoadedMsg) {
 		return
 	}
 	if msg.threadErr != nil {
+		m.logDebug("attached PR #%d sync failed: %v", msg.pr.Number, msg.threadErr)
 		m.status = fmt.Sprintf("attached PR #%d · sync failed", msg.pr.Number)
 		return
 	}
@@ -99,6 +100,7 @@ func (m *Model) handleRefreshLoaded(msg refreshLoadedMsg) {
 		return
 	}
 	if msg.threadErr != nil {
+		m.logDebug("github sync failed: %v", msg.threadErr)
 		m.status = "diff refreshed · github sync failed"
 		return
 	}

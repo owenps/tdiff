@@ -25,6 +25,7 @@ type Config struct {
 	Mode             git.Mode
 	IgnoreWhitespace bool
 	Offline          bool
+	Debug            bool
 }
 
 type Model struct {

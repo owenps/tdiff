@@ -41,6 +41,14 @@ func TestPRListParsesGhOutput(t *testing.T) {
 	}
 }
 
+func TestFormatRunErrorCompactsGraphQLQuery(t *testing.T) {
+	err := formatRunError([]string{"api", "graphql", "-f", "query=query { huge }", "-f", "owner=o"}, context.Canceled, "GraphQL: forbidden")
+	got := err.Error()
+	if strings.Contains(got, "query { huge }") || strings.Contains(got, "owner=o") || !strings.Contains(got, "gh api graphql failed") || !strings.Contains(got, "GraphQL: forbidden") {
+		t.Fatalf("bad error: %s", got)
+	}
+}
+
 func TestThreadsParsesGraphQL(t *testing.T) {
 	client := Client{Runner: fakeRunner{
 		"api graphql -f query=" + threadsQuery + " -f owner=o -f name=r -F number=12": `{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"t1","isResolved":false,"isOutdated":false,"path":"main.go","line":7,"startLine":5,"side":"RIGHT","startSide":"RIGHT","comments":{"nodes":[{"id":"c1","body":"body","url":"u","createdAt":"2026-01-02T03:04:05Z","updatedAt":"2026-01-02T03:04:06Z","author":{"login":"owenps","avatarUrl":"a","name":"Owen"}}]}}]}}}}}`,

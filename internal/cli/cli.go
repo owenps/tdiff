@@ -112,7 +112,7 @@ func mainHelpText() string {
 	return `tdiff - terminal diff review
 
 Usage:
-  tdiff [--base <ref>] [--staged|--unstaged] [--offline]
+  tdiff [--base <ref>] [--staged|--unstaged] [--offline] [--debug]
   tdiff review status|context|approve|unapprove|watch|events
   tdiff thread list|show|add|reply|resolve|reopen
   tdiff agent help|inbox [limit]
@@ -238,11 +238,12 @@ func runTUI(ctx context.Context, args []string) error {
 	unstaged := fs.Bool("unstaged", false, "show unstaged diff")
 	ignoreWhitespace := fs.Bool("ignore-space-change", false, "ignore whitespace changes")
 	offline := fs.Bool("offline", false, "disable network/external integrations")
+	debug := fs.Bool("debug", false, "write debug log to .git/tdiff/debug.log")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	mode := modeFromFlags(*staged, *unstaged)
-	m, err := app.New(ctx, app.Config{Base: *base, Mode: mode, IgnoreWhitespace: *ignoreWhitespace, Offline: *offline})
+	m, err := app.New(ctx, app.Config{Base: *base, Mode: mode, IgnoreWhitespace: *ignoreWhitespace, Offline: *offline, Debug: *debug})
 	if err != nil {
 		return err
 	}

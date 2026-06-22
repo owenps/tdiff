@@ -62,6 +62,7 @@ tdiff --base main
 tdiff --staged
 tdiff --unstaged
 tdiff --offline
+tdiff --debug   # write .git/tdiff/debug.log
 
 tdiff agent help
 tdiff agent inbox --json
@@ -97,6 +98,8 @@ tdiff stores review data locally in your repo:
 ```
 
 This includes review approval, threads, messages, viewed-file state, and GitHub PR metadata.
+
+Run `tdiff --debug` to write integration/debug failures to `.git/tdiff/debug.log`.
 
 ## Keybinds
 

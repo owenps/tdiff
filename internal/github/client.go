@@ -24,7 +24,7 @@ func (ExecRunner) Run(ctx context.Context, dir string, args ...string) ([]byte, 
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("gh %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+		return nil, formatRunError(args, err, stderr.String())
 	}
 	return stdout.Bytes(), nil
 }
@@ -36,6 +36,30 @@ type Client struct {
 
 func NewClient(dir string) Client {
 	return Client{Dir: dir, Runner: ExecRunner{}}
+}
+
+func formatRunError(args []string, err error, stderr string) error {
+	command := compactArgs(args)
+	detail := strings.TrimSpace(stderr)
+	if detail == "" {
+		return fmt.Errorf("gh %s failed: %w", command, err)
+	}
+	return fmt.Errorf("gh %s failed: %s: %w", command, detail, err)
+}
+
+func compactArgs(args []string) string {
+	if len(args) >= 2 && args[0] == "api" && args[1] == "graphql" {
+		return "api graphql"
+	}
+	parts := make([]string, 0, len(args))
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "query=") {
+			parts = append(parts, "query=<graphql>")
+			continue
+		}
+		parts = append(parts, arg)
+	}
+	return strings.Join(parts, " ")
 }
 
 type AttachedPR struct {
@@ -199,8 +223,8 @@ query($owner:String!, $name:String!, $number:Int!) {
           path
           line
           startLine
-          side
-          startSide
+          side: diffSide
+          startSide: startDiffSide
           comments(first:100) {
             nodes {
               id

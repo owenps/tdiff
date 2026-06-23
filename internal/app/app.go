@@ -99,7 +99,14 @@ func New(ctx context.Context, cfg Config) (Model, error) {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(textarea.Blink, loadingSpinnerTick(), autoRefreshTick(), tea.SetWindowTitle("∓ tdiff"))
+	return tea.Batch(textarea.Blink, loadingSpinnerTick(), autoRefreshTick(), m.initialGitHubRefreshCmd(), tea.SetWindowTitle("∓ tdiff"))
+}
+
+func (m Model) initialGitHubRefreshCmd() tea.Cmd {
+	if m.cfg.Offline {
+		return nil
+	}
+	return m.refreshProjectCmd(true)
 }
 
 type clearStatusMsg struct{ id int }

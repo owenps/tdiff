@@ -84,8 +84,11 @@ func (m *Model) handleRefreshLoaded(msg refreshLoadedMsg) {
 		m.status = msg.err.Error()
 		return
 	}
+	anchor := m.cursorAnchor()
 	m.compareTarget = msg.compareTarget
+	m.updateChangedFiles(msg.snap.Files)
 	m.session.SetSnapshot(msg.snap.Files, msg.snap.Hash)
+	m.restoreCursor(anchor)
 	m.viewCache = make(map[string]string)
 	m.statsCache = make(map[string]diffStats)
 	m.syntaxCache = make(map[string]string)
@@ -212,10 +215,14 @@ func (m Model) updateKey(msg tea.KeyMsg, previousStatus string) (tea.Model, tea.
 	case "n", "right":
 		m.pendingKey = ""
 		m.session.MoveFile(1)
+		m.acknowledgeCurrentFileChange()
+		m.invalidateViewCache()
 		m.splitOffset = 0
 	case "p", "left":
 		m.pendingKey = ""
 		m.session.MoveFile(-1)
+		m.acknowledgeCurrentFileChange()
+		m.invalidateViewCache()
 		m.splitOffset = 0
 	case "s":
 		m.pendingKey = ""
@@ -340,6 +347,7 @@ func (m *Model) toggleViewedStatus() {
 	if result.Path == "" {
 		return
 	}
+	m.acknowledgeFileChange(result.Path)
 	m.invalidateViewCache()
 	if !result.Viewed {
 		m.status = "unmarked viewed"

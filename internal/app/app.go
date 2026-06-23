@@ -17,6 +17,7 @@ import (
 	"github.com/owenps/tdiff/internal/review"
 	"github.com/owenps/tdiff/internal/snapshot"
 	"github.com/owenps/tdiff/internal/thread"
+	"github.com/owenps/tdiff/internal/threadtarget"
 	"github.com/owenps/tdiff/internal/threadworkflow"
 )
 
@@ -68,6 +69,8 @@ type Model struct {
 	syntaxCache       map[string]string
 	splitHunkCache    map[string]map[string]bool
 	splitNavCache     map[string]splitNav
+	fileHashes        map[string]string
+	changedFiles      map[string]bool
 	splitOffset       int
 }
 
@@ -80,7 +83,7 @@ func New(ctx context.Context, cfg Config) (Model, error) {
 	if err != nil {
 		return Model{}, err
 	}
-	m := Model{repo: repo, cfg: cfg, store: store, threads: threadworkflow.NewWorkflow(store), session: review.NewSession(nil), syntax: true, contextDim: true, viewCache: make(map[string]string), statsCache: make(map[string]diffStats), syntaxCache: make(map[string]string), splitHunkCache: make(map[string]map[string]bool), splitNavCache: make(map[string]splitNav)}
+	m := Model{repo: repo, cfg: cfg, store: store, threads: threadworkflow.NewWorkflow(store), session: review.NewSession(nil), syntax: true, contextDim: true, viewCache: make(map[string]string), statsCache: make(map[string]diffStats), syntaxCache: make(map[string]string), splitHunkCache: make(map[string]map[string]bool), splitNavCache: make(map[string]splitNav), fileHashes: make(map[string]string), changedFiles: make(map[string]bool)}
 	m.session.SetStores(store, store)
 	m.editor = textarea.New()
 	m.editor.Placeholder = "write a review comment…"
@@ -228,8 +231,11 @@ func (m *Model) reload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	anchor := m.cursorAnchor()
 	m.compareTarget = compareTarget
 	m.session.SetSnapshot(s.Files, s.Hash)
+	m.resetFileHashes(s.Files)
+	m.restoreCursor(anchor)
 	m.viewCache = make(map[string]string)
 	m.statsCache = make(map[string]diffStats)
 	m.syntaxCache = make(map[string]string)
@@ -237,6 +243,117 @@ func (m *Model) reload(ctx context.Context) error {
 	m.splitNavCache = make(map[string]splitNav)
 	m.splitOffset = 0
 	return nil
+}
+
+type cursorAnchor struct {
+	Path    string
+	FileIdx int
+	LineIdx int
+	Side    thread.Side
+	LineNo  int
+}
+
+func (m Model) cursorAnchor() cursorAnchor {
+	anchor := cursorAnchor{Path: m.currentPath(), FileIdx: m.session.FileIndex(), LineIdx: m.session.LineIndex()}
+	dl := m.session.SelectedLine()
+	if dl.Line == nil {
+		return anchor
+	}
+	side, _, ok := threadtarget.ForLine(*dl.Line)
+	if !ok {
+		return anchor
+	}
+	anchor.Side = side
+	anchor.LineNo = threadtarget.LineNumber(*dl.Line, side)
+	return anchor
+}
+
+func (m *Model) restoreCursor(anchor cursorAnchor) {
+	files := m.session.Files()
+	if len(files) == 0 {
+		return
+	}
+	fileIdx := clamp(anchor.FileIdx, 0, len(files)-1)
+	for i, f := range files {
+		if f.Path() == anchor.Path {
+			fileIdx = i
+			break
+		}
+	}
+	lineIdx := anchor.LineIdx
+	if anchor.LineNo > 0 && anchor.Side != "" {
+		lines := review.DisplayLinesForFile(files[fileIdx])
+		for i, dl := range lines {
+			if dl.Line != nil && threadtarget.LineNumber(*dl.Line, anchor.Side) == anchor.LineNo {
+				lineIdx = i
+				break
+			}
+		}
+	}
+	m.session.JumpToIndex(fileIdx, lineIdx, m.bodyHeight())
+	m.ensureSplitCursorVisible(m.bodyHeight())
+}
+
+func (m *Model) resetFileHashes(files []diff.File) {
+	m.fileHashes = fileHashes(files)
+	if m.changedFiles == nil {
+		m.changedFiles = make(map[string]bool)
+	}
+}
+
+func (m *Model) updateChangedFiles(files []diff.File) {
+	newHashes := fileHashes(files)
+	if m.fileHashes == nil {
+		m.fileHashes = newHashes
+		return
+	}
+	if m.changedFiles == nil {
+		m.changedFiles = make(map[string]bool)
+	}
+	for path, newHash := range newHashes {
+		if oldHash, ok := m.fileHashes[path]; !ok || oldHash != newHash {
+			m.changedFiles[path] = true
+		}
+	}
+	for path := range m.changedFiles {
+		if _, ok := newHashes[path]; !ok {
+			delete(m.changedFiles, path)
+		}
+	}
+	m.fileHashes = newHashes
+}
+
+func fileHashes(files []diff.File) map[string]string {
+	hashes := make(map[string]string, len(files))
+	for _, f := range files {
+		hashes[f.Path()] = diff.FileHash(f)
+	}
+	return hashes
+}
+
+func (m *Model) acknowledgeCurrentFileChange() {
+	m.acknowledgeFileChange(m.currentPath())
+}
+
+func (m *Model) acknowledgeFileChange(path string) {
+	if m.changedFiles == nil || path == "" {
+		return
+	}
+	delete(m.changedFiles, path)
+}
+
+func (m Model) changedFilesKey() string {
+	if len(m.changedFiles) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, f := range m.session.Files() {
+		if m.changedFiles[f.Path()] {
+			b.WriteString(f.Path())
+			b.WriteByte('\x00')
+		}
+	}
+	return b.String()
 }
 
 func (m Model) resolveCompareTarget(ctx context.Context) (string, error) {
@@ -585,13 +702,14 @@ func sidebarHeader(stats, threads string) string {
 	return strings.Join(parts, " ")
 }
 
-func selectedSidebarLine(prefix, viewed string, nameW int, path, added, deleted, threadBadge string, threadW int) string {
+func selectedSidebarLine(prefix, viewed, changed string, nameW int, path, added, deleted, threadBadge string, threadW int) string {
 	rail := selectedStyle.Render(prefix)
 	if strings.Contains(prefix, "▌") {
 		rail = selectedThreadStyle.Render("▌") + selectedStyle.Render(" ")
 	}
 	line := rail +
 		selectedStyle.Render(viewed+" ") +
+		selectedThreadStyle.Render(changed+" ") +
 		sidebarPath(path, nameW, true, viewed == "✓") +
 		selectedStyle.Render(" ") +
 		selectedAddStyle.Render(added) +
@@ -631,7 +749,7 @@ func sidebarColumnWidths(files []diff.File, threadBadge func(string) string, sta
 			threadW = max(threadW, xansi.StringWidth(badge))
 		}
 	}
-	nameW := max(8, sidebarWidth-7-addW-delW-threadW)
+	nameW := max(8, sidebarWidth-9-addW-delW-threadW)
 	return nameW, addW, delW, threadW
 }
 
@@ -779,10 +897,15 @@ func (m *Model) prevThread() {
 }
 
 func (m *Model) jumpThread(delta int) {
+	before := m.currentPath()
 	idx, total, ok := m.session.JumpThread(delta, m.bodyHeight())
 	if !ok {
 		m.status = "no threads"
 		return
+	}
+	if m.currentPath() != before {
+		m.acknowledgeCurrentFileChange()
+		m.invalidateViewCache()
 	}
 	m.status = fmt.Sprintf("thread %d/%d", idx, total)
 }
@@ -818,7 +941,7 @@ func (m Model) sidebarCacheKey(height int) string {
 	if selected, ok := m.selectedThread(); ok {
 		selectedID = selected.ID
 	}
-	return fmt.Sprintf("sidebar:%d:%d:%d:%s:%d:%d:%t:%t", height, m.session.FileIndex(), len(m.session.Files()), selectedID, m.totalThreadCount(), m.totalUnreadThreadCount(), m.session.HideViewed(), m.session.ThreadsOnly())
+	return fmt.Sprintf("sidebar:%d:%d:%d:%s:%d:%d:%t:%t:%s", height, m.session.FileIndex(), len(m.session.Files()), selectedID, m.totalThreadCount(), m.totalUnreadThreadCount(), m.session.HideViewed(), m.session.ThreadsOnly(), m.changedFilesKey())
 }
 
 func (m Model) renderSidebar(height int) string {
@@ -849,6 +972,10 @@ func (m Model) renderSidebar(height int) string {
 		if m.session.IsViewed(path) {
 			viewed = "✓"
 		}
+		changed := " "
+		if m.changedFiles[path] {
+			changed = "◆"
+		}
 		stats := m.fileStats(f)
 		threadCount := m.threadCount(path)
 		threadBadge := threadBadgeText(threadCount, m.unreadThreadCount(path))
@@ -856,9 +983,9 @@ func (m Model) renderSidebar(height int) string {
 		deletedText := fmt.Sprintf("%*s", delW, sidebarStat("-", stats.Deleted))
 		added := addStyle.Render(addedText)
 		deleted := deleteStyle.Render(deletedText)
-		line := fmt.Sprintf("%s%s %s %s %s %s", prefix, viewed, sidebarPath(path, nameW, false, viewed == "✓"), added, deleted, sidebarThreadView(threadBadge, threadW))
+		line := fmt.Sprintf("%s%s %s %s %s %s %s", prefix, viewed, threadStyle.Render(changed), sidebarPath(path, nameW, false, viewed == "✓"), added, deleted, sidebarThreadView(threadBadge, threadW))
 		if i == fileIdx {
-			line = selectedSidebarLine(prefix, viewed, nameW, path, addedText, deletedText, threadBadge, threadW)
+			line = selectedSidebarLine(prefix, viewed, changed, nameW, path, addedText, deletedText, threadBadge, threadW)
 		} else if viewed == "✓" {
 			line = dimStyle.Render(line)
 		}

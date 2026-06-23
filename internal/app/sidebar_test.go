@@ -43,6 +43,54 @@ func TestRenderSidebarUsesCompactedStats(t *testing.T) {
 	}
 }
 
+func TestChangedFileMarkerPersistsUntilAcknowledged(t *testing.T) {
+	oldFile := diff.File{NewPath: "a.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+old"}}}}}
+	newFile := diff.File{NewPath: "a.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+new"}}}}}
+	store := &thread.Store{}
+	session := review.NewSession([]diff.File{oldFile})
+	m := Model{store: store, session: session, width: 100, fileHashes: fileHashes([]diff.File{oldFile}), changedFiles: make(map[string]bool)}
+
+	m.updateChangedFiles([]diff.File{newFile})
+	out := xansi.Strip(m.renderSidebar(5))
+	if !strings.Contains(out, "◆") {
+		t.Fatalf("sidebar missing changed marker:\n%s", out)
+	}
+
+	m.updateChangedFiles([]diff.File{newFile})
+	if !m.changedFiles["a.go"] {
+		t.Fatal("unchanged refresh cleared changed marker")
+	}
+
+	m.acknowledgeFileChange("a.go")
+	m.invalidateViewCache()
+	out = xansi.Strip(m.renderSidebar(5))
+	if strings.Contains(out, "◆") {
+		t.Fatalf("sidebar still shows acknowledged marker:\n%s", out)
+	}
+}
+
+func TestRestoreCursorKeepsPathAndLineAcrossRefresh(t *testing.T) {
+	oldFiles := []diff.File{
+		{NewPath: "a.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+a"}}}}},
+		{NewPath: "b.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1,2 @@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+one"}, {Kind: diff.Add, NewNo: 2, Text: "+two"}}}}},
+	}
+	newFiles := []diff.File{
+		{NewPath: "a.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+changed"}}}}},
+		oldFiles[1],
+	}
+	store := &thread.Store{}
+	session := review.NewSession(oldFiles)
+	m := Model{store: store, session: session, width: 100, height: 12}
+	m.session.JumpToIndex(1, 2, m.bodyHeight())
+	anchor := m.cursorAnchor()
+	m.session.SetSnapshot(newFiles, "hash")
+	m.restoreCursor(anchor)
+
+	if m.currentPath() != "b.go" || m.session.LineIndex() != 2 {
+		t.Fatalf("path=%q line=%d", m.currentPath(), m.session.LineIndex())
+	}
+}
+
 func TestRenderSidebarShowsReplyCounts(t *testing.T) {
 	file := diff.File{NewPath: "file.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+new"}}}}}
 	store := &thread.Store{Threads: []thread.Thread{{ID: "n1", Path: "file.go", Side: thread.SideNew, LineStart: 1, LineEnd: 1, Messages: []thread.Message{

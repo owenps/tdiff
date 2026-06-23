@@ -99,11 +99,12 @@ func New(ctx context.Context, cfg Config) (Model, error) {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(textarea.Blink, loadingSpinnerTick(), tea.SetWindowTitle("∓ tdiff"))
+	return tea.Batch(textarea.Blink, loadingSpinnerTick(), autoRefreshTick(), tea.SetWindowTitle("∓ tdiff"))
 }
 
 type clearStatusMsg struct{ id int }
 type loadingSpinnerTickMsg struct{}
+type autoRefreshTickMsg struct{}
 type prListLoadedMsg struct {
 	prs []gh.PullRequest
 	err error
@@ -123,6 +124,7 @@ type refreshLoadedMsg struct {
 	threadErr     error
 	offline       bool
 	noPR          bool
+	auto          bool
 }
 
 type threadStatusChangedMsg struct {
@@ -134,6 +136,12 @@ type threadStatusChangedMsg struct {
 func loadingSpinnerTick() tea.Cmd {
 	return tea.Tick(120*time.Millisecond, func(time.Time) tea.Msg {
 		return loadingSpinnerTickMsg{}
+	})
+}
+
+func autoRefreshTick() tea.Cmd {
+	return tea.Tick(60*time.Second, func(time.Time) tea.Msg {
+		return autoRefreshTickMsg{}
 	})
 }
 
@@ -396,7 +404,11 @@ func (m Model) compareTargetLabel() string {
 	return "none"
 }
 
-func (m Model) refreshProjectCmd() tea.Cmd {
+func (m Model) shouldAutoRefresh() bool {
+	return m.ready() && !m.cfg.Offline && !m.composing && !m.prPicker.Active() && !m.prAttaching && !m.refreshing && m.store != nil && m.store.GitHub != nil && m.store.GitHub.Number > 0
+}
+
+func (m Model) refreshProjectCmd(auto bool) tea.Cmd {
 	repo := m.repo
 	cfg := m.cfg
 	var existingPR *gh.AttachedPR
@@ -408,13 +420,13 @@ func (m Model) refreshProjectCmd() tea.Cmd {
 		ctx := context.Background()
 		compareTarget, err := resolveCompareTarget(ctx, repo, cfg)
 		if err != nil {
-			return refreshLoadedMsg{err: err}
+			return refreshLoadedMsg{err: err, auto: auto}
 		}
 		snap, err := snapshot.Load(ctx, repo, git.DiffOptions{Mode: cfg.Mode, Base: cfg.Base, IgnoreWhitespace: cfg.IgnoreWhitespace})
 		if err != nil {
-			return refreshLoadedMsg{err: err}
+			return refreshLoadedMsg{err: err, auto: auto}
 		}
-		msg := refreshLoadedMsg{snap: snap, compareTarget: compareTarget}
+		msg := refreshLoadedMsg{snap: snap, compareTarget: compareTarget, auto: auto}
 		if cfg.Offline {
 			msg.offline = true
 			return msg

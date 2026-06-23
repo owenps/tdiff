@@ -21,6 +21,13 @@ func (m Model) handleAsyncMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
 			return m, loadingSpinnerTick(), true
 		}
 		return m, nil, true
+	case autoRefreshTickMsg:
+		cmd := autoRefreshTick()
+		if m.shouldAutoRefresh() {
+			m.refreshing = true
+			cmd = tea.Batch(cmd, m.refreshProjectCmd(true), loadingSpinnerTick())
+		}
+		return m, cmd, true
 	case prListLoadedMsg:
 		if !m.prPicker.Active() {
 			return m, nil, true
@@ -81,6 +88,10 @@ func (m *Model) handlePRAttachLoaded(msg prAttachLoadedMsg) {
 func (m *Model) handleRefreshLoaded(msg refreshLoadedMsg) {
 	m.refreshing = false
 	if msg.err != nil {
+		if msg.auto {
+			m.logDebug("auto refresh failed: %v", msg.err)
+			return
+		}
 		m.status = msg.err.Error()
 		return
 	}
@@ -96,30 +107,46 @@ func (m *Model) handleRefreshLoaded(msg refreshLoadedMsg) {
 	m.splitNavCache = make(map[string]splitNav)
 	m.splitOffset = 0
 	if msg.offline {
-		m.status = "diff refreshed · offline"
+		if !msg.auto {
+			m.status = "diff refreshed · offline"
+		}
 		return
 	}
 	if msg.noPR || msg.pr == nil {
-		m.status = "diff refreshed · no PR"
+		if !msg.auto {
+			m.status = "diff refreshed · no PR"
+		}
 		return
 	}
 	if err := m.store.AttachGitHubPR(*msg.pr); err != nil {
+		if msg.auto {
+			m.logDebug("auto refresh attach failed: %v", err)
+			return
+		}
 		m.status = err.Error()
 		return
 	}
 	if msg.threadErr != nil {
 		m.logDebug("github sync failed: %v", msg.threadErr)
-		m.status = "diff refreshed · github sync failed"
+		if !msg.auto {
+			m.status = "diff refreshed · github sync failed"
+		}
 		return
 	}
 	count, err := m.store.SyncGitHubThreads(*msg.pr, msg.threads)
 	if err != nil {
+		if msg.auto {
+			m.logDebug("auto refresh sync failed: %v", err)
+			return
+		}
 		m.status = err.Error()
 		return
 	}
 	m.session.RefreshFilters()
 	m.invalidateViewCache()
-	m.status = fmt.Sprintf("PR #%d synced · %d threads", msg.pr.Number, count)
+	if !msg.auto {
+		m.status = fmt.Sprintf("PR #%d synced · %d threads", msg.pr.Number, count)
+	}
 }
 
 func (m Model) updateComposer(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -334,7 +361,7 @@ func (m Model) refreshKey(previousStatus string) (tea.Model, tea.Cmd) {
 	}
 	m.refreshing = true
 	m.status = "refreshing…"
-	return m, tea.Batch(m.refreshProjectCmd(), loadingSpinnerTick())
+	return m, tea.Batch(m.refreshProjectCmd(false), loadingSpinnerTick())
 }
 
 func (m *Model) toggleViewedStatus() {

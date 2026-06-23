@@ -304,6 +304,12 @@ func (m Model) refreshProjectCmd() tea.Cmd {
 		}
 		client := gh.NewClient(repo.Root)
 		pr := existingPR
+		if pr != nil && pr.Number > 0 {
+			refreshed, err := client.PRView(ctx, pr.Number)
+			if err == nil {
+				pr = &refreshed
+			}
+		}
 		if pr == nil || pr.Number == 0 {
 			detected, err := client.AutoDetectPR(ctx)
 			if err != nil {

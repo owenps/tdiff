@@ -242,6 +242,9 @@ func runTUI(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if !isInteractiveTerminal() {
+		return errors.New(nonInteractiveTUIHelp())
+	}
 	mode := modeFromFlags(*staged, *unstaged)
 	m, err := app.New(ctx, app.Config{Base: *base, Mode: mode, IgnoreWhitespace: *ignoreWhitespace, Offline: *offline, Debug: *debug})
 	if err != nil {
@@ -249,6 +252,19 @@ func runTUI(ctx context.Context, args []string) error {
 	}
 	_, err = tea.NewProgram(m, tea.WithAltScreen()).Run()
 	return err
+}
+
+func isInteractiveTerminal() bool {
+	return isTerminalFile(os.Stdin) && isTerminalFile(os.Stdout)
+}
+
+func isTerminalFile(f *os.File) bool {
+	info, err := f.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func nonInteractiveTUIHelp() string {
+	return "tdiff opens an interactive TUI; this shell is not interactive.\nFor agent/CLI workflows: tdiff agent --help\nFor all commands: tdiff --help"
 }
 
 func runReview(ctx context.Context, args []string) error {

@@ -31,6 +31,7 @@ func TestPRStatusViewLabelsOnlyImportantStates(t *testing.T) {
 		{status: "", want: "PR #12"},
 		{status: gh.PRStatusReady, want: "PR #12 ready"},
 		{status: gh.PRStatusDraft, want: "PR #12 draft"},
+		{status: gh.PRStatusBehind, want: "PR #12 behind"},
 		{status: gh.PRStatusBlocked, want: "PR #12 blocked"},
 		{status: gh.PRStatusMerged, want: "PR #12 merged"},
 		{status: gh.PRStatusClosed, want: "PR #12 closed"},

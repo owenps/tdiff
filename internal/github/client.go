@@ -122,7 +122,7 @@ func (c Client) AutoDetectPR(ctx context.Context) (AttachedPR, error) {
 	return pr, nil
 }
 
-const prViewFields = "number,url,title,author,headRefName,baseRefName,headRefOid,isDraft,state,mergedAt,mergeable,reviewDecision,statusCheckRollup"
+const prViewFields = "number,url,title,author,headRefName,baseRefName,headRefOid,isDraft,state,mergedAt,mergeable,mergeStateStatus,reviewDecision,statusCheckRollup"
 
 func (c Client) PRView(ctx context.Context, number ...int) (AttachedPR, error) {
 	args := []string{"pr", "view", "--json", prViewFields}
@@ -144,6 +144,7 @@ func (c Client) PRView(ctx context.Context, number ...int) (AttachedPR, error) {
 		State             string          `json:"state"`
 		MergedAt          *time.Time      `json:"mergedAt"`
 		Mergeable         string          `json:"mergeable"`
+		MergeStateStatus  string          `json:"mergeStateStatus"`
 		ReviewDecision    string          `json:"reviewDecision"`
 		StatusCheckRollup json.RawMessage `json:"statusCheckRollup"`
 		Author            struct {
@@ -157,7 +158,7 @@ func (c Client) PRView(ctx context.Context, number ...int) (AttachedPR, error) {
 	if err != nil {
 		return AttachedPR{}, err
 	}
-	status := derivePRStatus(raw.State, raw.MergedAt, raw.Mergeable, raw.ReviewDecision, raw.IsDraft, raw.StatusCheckRollup)
+	status := derivePRStatus(raw.State, raw.MergedAt, raw.Mergeable, raw.MergeStateStatus, raw.ReviewDecision, raw.IsDraft, raw.StatusCheckRollup)
 	return AttachedPR{Owner: repo.Owner, Repo: repo.Name, Number: raw.Number, URL: raw.URL, Title: raw.Title, AuthorLogin: raw.Author.Login, HeadRef: raw.HeadRefName, BaseRef: raw.BaseRefName, HeadOID: raw.HeadRefOID, Status: status}, nil
 }
 

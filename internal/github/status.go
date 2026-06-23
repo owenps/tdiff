@@ -12,14 +12,16 @@ type PRStatus string
 const (
 	PRStatusReady   PRStatus = "ready"
 	PRStatusDraft   PRStatus = "draft"
+	PRStatusBehind  PRStatus = "behind"
 	PRStatusBlocked PRStatus = "blocked"
 	PRStatusMerged  PRStatus = "merged"
 	PRStatusClosed  PRStatus = "closed"
 )
 
-func derivePRStatus(state string, mergedAt *time.Time, mergeable, reviewDecision string, isDraft bool, statusCheckRollup json.RawMessage) PRStatus {
+func derivePRStatus(state string, mergedAt *time.Time, mergeable, mergeStateStatus, reviewDecision string, isDraft bool, statusCheckRollup json.RawMessage) PRStatus {
 	state = strings.ToUpper(state)
 	mergeable = strings.ToUpper(mergeable)
+	mergeStateStatus = strings.ToUpper(mergeStateStatus)
 	reviewDecision = strings.ToUpper(reviewDecision)
 
 	if state == "MERGED" || mergedAt != nil {
@@ -29,8 +31,11 @@ func derivePRStatus(state string, mergedAt *time.Time, mergeable, reviewDecision
 		return PRStatusClosed
 	}
 	checksFailing, checksPending := checkRollupState(statusCheckRollup)
-	if mergeable == "CONFLICTING" || mergeable == "DIRTY" || mergeable == "BLOCKED" || checksFailing {
+	if mergeable == "CONFLICTING" || mergeable == "DIRTY" || mergeable == "BLOCKED" || mergeStateStatus == "DIRTY" || mergeStateStatus == "BLOCKED" || checksFailing {
 		return PRStatusBlocked
+	}
+	if mergeStateStatus == "BEHIND" {
+		return PRStatusBehind
 	}
 	if isDraft {
 		return PRStatusDraft

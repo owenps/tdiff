@@ -1188,6 +1188,8 @@ func prStatusView(pr gh.AttachedPR) string {
 		return successStyle.Render(label + " ready")
 	case gh.PRStatusDraft:
 		return dimStyle.Render(label + " draft")
+	case gh.PRStatusBehind:
+		return blueStyle.Render(label + " behind")
 	case gh.PRStatusBlocked:
 		return errorStyle.Render(label + " blocked")
 	case gh.PRStatusMerged:
@@ -1340,6 +1342,7 @@ var (
 	selectedDimStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Background(selectedBg)
 	successStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
 	warningStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	blueStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
 	errorStyle              = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 	purpleStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("141"))
 	hunkColor               = lipgloss.Color("99")

@@ -22,6 +22,15 @@ func TestMainHelpPointsAgentsToAgentHelp(t *testing.T) {
 	}
 }
 
+func TestNonInteractiveTUIHelpSteersAgentsToCLI(t *testing.T) {
+	got := nonInteractiveTUIHelp()
+	for _, want := range []string{"interactive TUI", "tdiff agent --help", "tdiff --help"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("non-interactive help missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestAgentHelpContainsWorkflowAndExplicitEventKeys(t *testing.T) {
 	got := agentHelpText()
 	for _, want := range []string{"tdiff agent inbox --json", "tdiff review watch", "tdiff review events --json", "tdiff thread show <thread_id> --json", "thread_id=", "body_preview=", "Do not approve"} {

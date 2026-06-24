@@ -53,9 +53,12 @@ Agent loop:
 tdiff agent inbox --json
 tdiff review watch
 tdiff thread reply T123 --actor agent --body "Fixed; added test"
+tdiff agent wait
 ```
 
 `tdiff review watch` emits compact text events. Use `--json` for JSONL.
+
+`tdiff agent wait` waits until the current diff is approved or blocking review threads appear. It always prints final status. Exit codes: `0` approved, `2` blocked, `124` timeout, `1` error.
 
 ## CLI
 
@@ -69,6 +72,8 @@ tdiff --debug   # write .git/tdiff/debug.log
 tdiff agent help
 tdiff agent inbox --json
 tdiff agent inbox 5 --json
+tdiff agent wait              # exits 0 when current diff is approved
+tdiff agent wait --timeout 30m
 
 # agent/review API
 tdiff review status --json

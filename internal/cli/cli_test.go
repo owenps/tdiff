@@ -66,6 +66,36 @@ func TestBuildAgentInboxFiltersSortsAndLimits(t *testing.T) {
 	}
 }
 
+func TestAgentWaitDecisionApproved(t *testing.T) {
+	store := &thread.Store{Review: thread.Review{ApprovedDiffHash: "h"}}
+	snap := snapshot.Snapshot{Hash: "h"}
+
+	result, terminal, code := agentWaitDecision(store, snap)
+	if !terminal || code != 0 || result.Outcome != "approved" {
+		t.Fatalf("result=%+v terminal=%t code=%d", result, terminal, code)
+	}
+}
+
+func TestAgentWaitDecisionBlockedBeatsApproved(t *testing.T) {
+	store := &thread.Store{Review: thread.Review{ApprovedDiffHash: "h"}, Threads: []thread.Thread{{ID: "T1", Path: "a.go", Side: thread.SideNew, LineStart: 1, Messages: []thread.Message{{Actor: thread.ActorHuman, Body: "fix"}}, Status: thread.StatusOpen}}}
+	snap := snapshot.Snapshot{Hash: "h", Files: []diff.File{{NewPath: "a.go", Hunks: []diff.Hunk{{Lines: []diff.Line{{Kind: diff.Add, NewNo: 1}}}}}}}
+
+	result, terminal, code := agentWaitDecision(store, snap)
+	if !terminal || code != agentWaitExitBlocked || result.Outcome != "blocked" || strings.Join(result.BlockingThreads, ",") != "T1" {
+		t.Fatalf("result=%+v terminal=%t code=%d", result, terminal, code)
+	}
+}
+
+func TestAgentWaitDecisionPendingWithoutCurrentThreads(t *testing.T) {
+	store := &thread.Store{}
+	snap := snapshot.Snapshot{Hash: "h"}
+
+	result, terminal, code := agentWaitDecision(store, snap)
+	if terminal || code != 0 || result.Outcome != "pending" {
+		t.Fatalf("result=%+v terminal=%t code=%d", result, terminal, code)
+	}
+}
+
 func TestEventTextLineUsesExplicitKeys(t *testing.T) {
 	line := []byte(`{"id":"E1","type":"thread.created","thread_id":"T1","source":"github","actor":"alice","path":"internal/foo.go","side":"new","line_start":3,"line_end":5,"diff_hash":"abc123","body":"rename this\nextra detail","created_at":"2026-06-21T00:00:00Z"}`)
 

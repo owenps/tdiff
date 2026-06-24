@@ -30,6 +30,25 @@ type diffFlags struct {
 	ignoreWhitespace bool
 }
 
+type ExitError struct {
+	Code int
+	Err  error
+}
+
+func (e ExitError) Error() string {
+	if e.Err == nil {
+		return ""
+	}
+	return e.Err.Error()
+}
+
+func (e ExitError) ExitCode() int {
+	if e.Code == 0 {
+		return 1
+	}
+	return e.Code
+}
+
 type loadedReview struct {
 	repoRoot string
 	store    *thread.Store
@@ -103,8 +122,11 @@ func runAgent(args []string) error {
 		fmt.Print(agentHelpText())
 		return nil
 	}
-	if args[0] == "inbox" {
+	switch args[0] {
+	case "inbox":
 		return runAgentInbox(context.Background(), args[1:])
+	case "wait":
+		return runAgentWait(context.Background(), args[1:])
 	}
 	return fmt.Errorf("unknown agent command %q", args[0])
 }
@@ -116,14 +138,16 @@ Usage:
   tdiff [--base <ref>] [--staged|--unstaged] [--offline] [--debug]
   tdiff review status|context|approve|unapprove|watch|events
   tdiff thread list|show|add|reply|resolve|reopen
-  tdiff agent help|inbox [limit]
+  tdiff agent help|inbox [limit]|wait
 
 Agent quick start:
   tdiff agent inbox     # current open review threads for agents
+  tdiff agent wait      # wait for approval or blocking review threads
   tdiff review watch    # compact text event stream; add --json for JSONL
 
 Common commands:
   tdiff agent inbox 5 --json
+  tdiff agent wait --json --timeout 30m
   tdiff review context --json
   tdiff thread show <id> --json
   tdiff thread reply <id> --actor agent --body "Fixed; added test"
@@ -150,7 +174,7 @@ Workflow:
        tdiff thread reply <thread_id> --actor agent --body "Fixed; ran go test ./..."
   7. Resolve only when clearly handled:
        tdiff thread resolve <thread_id> --actor agent
-  8. Stop when review.approved appears for the current diff.
+  8. Stop when tdiff agent wait exits 0 for the current diff.
 
 Event stream:
   tdiff review watch emits compact text with explicit keys and polls attached GitHub PRs:
@@ -164,6 +188,7 @@ Rules:
   - Always reply in-thread after acting, with brief evidence.
 
 JSON options:
+  tdiff agent wait --json
   tdiff review watch --json
   tdiff review events --json
 
@@ -201,6 +226,117 @@ func runAgentInbox(ctx context.Context, args []string) error {
 		fmt.Printf("%s %s:%d actor=%s replies=%d %s\n", t.ID, t.Path, t.LineStart, t.LastActor, threadReplyCount(t.Thread), item.BodyPreview)
 	}
 	return nil
+}
+
+const (
+	agentWaitExitBlocked = 2
+	agentWaitExitTimeout = 124
+)
+
+type agentWaitResult struct {
+	Outcome         string        `json:"outcome"`
+	Review          reviewSummary `json:"review"`
+	BlockingThreads []string      `json:"blocking_threads,omitempty"`
+}
+
+func runAgentWait(ctx context.Context, args []string) error {
+	dfs := newDiffFlagSet("tdiff agent wait")
+	jsonOut := dfs.fs.Bool("json", false, "emit JSON")
+	timeout := dfs.fs.Duration("timeout", 0, "max time to wait; 0 waits forever")
+	pollInterval := dfs.fs.Duration("poll-interval", 500*time.Millisecond, "review state polling interval")
+	pollGitHub := dfs.fs.Bool("poll-github", true, "poll attached GitHub PR threads")
+	githubPollInterval := dfs.fs.Duration("github-poll-interval", 30*time.Second, "GitHub polling interval")
+	if err := dfs.fs.Parse(args); err != nil {
+		return err
+	}
+	if dfs.fs.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", dfs.fs.Arg(0))
+	}
+	if *timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, *timeout)
+		defer cancel()
+	}
+	if *pollInterval <= 0 {
+		*pollInterval = 500 * time.Millisecond
+	}
+	lastGitHubPoll := time.Time{}
+	var last agentWaitResult
+	for {
+		loaded, err := loadReview(ctx, dfs.opts())
+		if err != nil {
+			return err
+		}
+		now := time.Now()
+		if *pollGitHub && loaded.store.GitHub != nil && (lastGitHubPoll.IsZero() || now.Sub(lastGitHubPoll) >= *githubPollInterval) {
+			if err := syncAttachedGitHub(ctx, loaded.repoRoot); err != nil {
+				fmt.Fprintf(os.Stderr, "github poll failed: %v\n", err)
+			} else if reloaded, err := loadReview(ctx, dfs.opts()); err == nil {
+				loaded = reloaded
+			}
+			lastGitHubPoll = now
+		}
+		result, terminal, code := agentWaitDecision(loaded.store, loaded.snap)
+		last = result
+		if terminal {
+			printAgentWaitResult(result, *jsonOut)
+			if code == 0 {
+				return nil
+			}
+			return ExitError{Code: code}
+		}
+		select {
+		case <-ctx.Done():
+			last.Outcome = "timeout"
+			printAgentWaitResult(last, *jsonOut)
+			return ExitError{Code: agentWaitExitTimeout}
+		case <-time.After(*pollInterval):
+		}
+	}
+}
+
+func agentWaitDecision(store *thread.Store, snap snapshot.Snapshot) (agentWaitResult, bool, int) {
+	summary := summarizeReview(store, snap)
+	blocking := blockingThreadIDs(store.Threads, snap.Files)
+	result := agentWaitResult{Outcome: "pending", Review: summary, BlockingThreads: blocking}
+	if len(blocking) > 0 {
+		result.Outcome = "blocked"
+		return result, true, agentWaitExitBlocked
+	}
+	if summary.Status == "approved" {
+		result.Outcome = "approved"
+		return result, true, 0
+	}
+	return result, false, 0
+}
+
+func blockingThreadIDs(threads []thread.Thread, files []diff.File) []string {
+	var ids []string
+	for _, t := range threads {
+		if t.Status == thread.StatusResolved || !isThreadCurrent(t, files) {
+			continue
+		}
+		ids = append(ids, t.ID)
+	}
+	return ids
+}
+
+func printAgentWaitResult(result agentWaitResult, jsonOut bool) {
+	if jsonOut {
+		_ = writeJSON(result)
+		return
+	}
+	s := result.Review
+	switch result.Outcome {
+	case "approved":
+		fmt.Printf("approved diff=%s open=%d stale=%d\n", s.DiffHash, s.CurrentThreads, s.StaleThreads)
+	case "blocked":
+		fmt.Printf("blocked diff=%s open=%d threads=%s\n", s.DiffHash, s.CurrentThreads, strings.Join(result.BlockingThreads, ","))
+	case "timeout":
+		fmt.Printf("timeout status=%s diff=%s open=%d\n", s.Status, s.DiffHash, s.CurrentThreads)
+	default:
+		fmt.Printf("%s diff=%s open=%d stale=%d\n", s.Status, s.DiffHash, s.CurrentThreads, s.StaleThreads)
+	}
 }
 
 func extractAgentInboxLimit(args []string) (int, []string, error) {

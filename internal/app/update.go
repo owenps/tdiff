@@ -95,6 +95,14 @@ func (m *Model) handleRefreshLoaded(msg refreshLoadedMsg) {
 		m.status = msg.err.Error()
 		return
 	}
+	if err := m.reloadStore(); err != nil {
+		if msg.auto {
+			m.logDebug("auto store reload failed: %v", err)
+			return
+		}
+		m.status = err.Error()
+		return
+	}
 	anchor := m.cursorAnchor()
 	m.compareTarget = msg.compareTarget
 	m.updateChangedFiles(msg.snap.Files)

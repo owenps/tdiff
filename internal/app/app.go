@@ -412,7 +412,18 @@ func (m Model) compareTargetLabel() string {
 }
 
 func (m Model) shouldAutoRefresh() bool {
-	return m.ready() && !m.cfg.Offline && !m.composing && !m.prPicker.Active() && !m.prAttaching && !m.refreshing && m.store != nil && m.store.GitHub != nil && m.store.GitHub.Number > 0
+	return m.ready() && !m.composing && !m.prPicker.Active() && !m.prAttaching && !m.refreshing && m.store != nil
+}
+
+func (m *Model) reloadStore() error {
+	store, err := thread.Open(m.repo.Root)
+	if err != nil {
+		return err
+	}
+	m.store = store
+	m.threads = threadworkflow.NewWorkflow(store)
+	m.session.SetStores(store, store)
+	return nil
 }
 
 func (m Model) refreshProjectCmd(auto bool) tea.Cmd {

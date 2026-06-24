@@ -2,12 +2,16 @@ package app
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/owenps/tdiff/internal/diff"
+	"github.com/owenps/tdiff/internal/git"
 	"github.com/owenps/tdiff/internal/review"
+	"github.com/owenps/tdiff/internal/snapshot"
 	"github.com/owenps/tdiff/internal/thread"
 	"github.com/owenps/tdiff/internal/threadworkflow"
 )
@@ -85,6 +89,34 @@ func TestRestoreCursorKeepsPathAndLineAcrossRefresh(t *testing.T) {
 	anchor := m.cursorAnchor()
 	m.session.SetSnapshot(newFiles, "hash")
 	m.restoreCursor(anchor)
+
+	if m.currentPath() != "b.go" || m.session.LineIndex() != 2 {
+		t.Fatalf("path=%q line=%d", m.currentPath(), m.session.LineIndex())
+	}
+}
+
+func TestRefreshLoadedKeepsCursorAfterStoreReload(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store, err := thread.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldFiles := []diff.File{
+		{NewPath: "a.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+a"}}}}},
+		{NewPath: "b.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1,2 @@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+one"}, {Kind: diff.Add, NewNo: 2, Text: "+two"}}}}},
+	}
+	newFiles := []diff.File{
+		{NewPath: "a.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+changed"}}}}},
+		oldFiles[1],
+	}
+	m := Model{repo: git.Repo{Root: root}, store: store, threads: threadworkflow.NewWorkflow(store), session: review.NewSession(oldFiles), width: 100, height: 12}
+	m.session.SetStores(store, store)
+	m.session.JumpToIndex(1, 2, m.bodyHeight())
+
+	m.handleRefreshLoaded(refreshLoadedMsg{snap: snapshot.Snapshot{Files: newFiles, Hash: "hash"}, offline: true, auto: true})
 
 	if m.currentPath() != "b.go" || m.session.LineIndex() != 2 {
 		t.Fatalf("path=%q line=%d", m.currentPath(), m.session.LineIndex())

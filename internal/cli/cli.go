@@ -31,8 +31,9 @@ type diffFlags struct {
 }
 
 type loadedReview struct {
-	store *thread.Store
-	snap  snapshot.Snapshot
+	repoRoot string
+	store    *thread.Store
+	snap     snapshot.Snapshot
 }
 
 type threadView struct {
@@ -152,7 +153,7 @@ Workflow:
   8. Stop when review.approved appears for the current diff.
 
 Event stream:
-  tdiff review watch emits compact text with explicit keys, for example:
+  tdiff review watch emits compact text with explicit keys and polls attached GitHub PRs:
     E1 thread.created thread_id=T1 actor=human path="internal/foo.go" line_start=3 body_preview="Handle nil repo"
 
 Rules:
@@ -351,6 +352,8 @@ func runReviewEvents(ctx context.Context, name string, args []string, followDefa
 	dfs := newDiffFlagSet(name)
 	jsonOut := dfs.fs.Bool("json", false, "emit JSON lines")
 	follow := dfs.fs.Bool("follow", followDefault, "follow new events")
+	pollGitHub := dfs.fs.Bool("poll-github", followDefault, "poll attached GitHub PR while following")
+	pollInterval := dfs.fs.Duration("poll-interval", 30*time.Second, "GitHub polling interval")
 	if err := dfs.fs.Parse(args); err != nil {
 		return err
 	}
@@ -358,7 +361,13 @@ func runReviewEvents(ctx context.Context, name string, args []string, followDefa
 	if err != nil {
 		return err
 	}
-	return streamEvents(loaded.store.EventsPath(), *follow, *jsonOut)
+	opts := eventStreamOptions{follow: *follow, jsonLines: *jsonOut}
+	if *follow && *pollGitHub && loaded.store.GitHub != nil {
+		repoRoot := loaded.repoRoot
+		opts.pollInterval = *pollInterval
+		opts.poll = func() error { return syncAttachedGitHub(ctx, repoRoot) }
+	}
+	return streamEvents(loaded.store.EventsPath(), opts)
 }
 
 func runThread(ctx context.Context, args []string) error {
@@ -538,7 +547,7 @@ func runEvents(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	return streamEvents(store.EventsPath(), *follow, *jsonOut)
+	return streamEvents(store.EventsPath(), eventStreamOptions{follow: *follow, jsonLines: *jsonOut})
 }
 
 type diffFlagSet struct {
@@ -588,7 +597,7 @@ func loadReview(ctx context.Context, opts diffFlags) (loadedReview, error) {
 	if err != nil {
 		return loadedReview{}, err
 	}
-	return loadedReview{store: store, snap: snap}, nil
+	return loadedReview{repoRoot: repo.Root, store: store, snap: snap}, nil
 }
 
 func summarizeReview(store *thread.Store, snap snapshot.Snapshot) reviewSummary {
@@ -731,9 +740,16 @@ func writeJSON(v any) error {
 	return enc.Encode(v)
 }
 
-func streamEvents(path string, follow bool, jsonLines bool) error {
+type eventStreamOptions struct {
+	follow       bool
+	jsonLines    bool
+	poll         func() error
+	pollInterval time.Duration
+}
+
+func streamEvents(path string, opts eventStreamOptions) error {
 	emit := func(line []byte) error {
-		if jsonLines {
+		if opts.jsonLines {
 			fmt.Println(string(line))
 			return nil
 		}
@@ -749,15 +765,43 @@ func streamEvents(path string, follow bool, jsonLines bool) error {
 	if err := readEventsFrom(path, 0, emit, &offset); err != nil {
 		return err
 	}
-	if !follow {
+	if !opts.follow {
 		return nil
 	}
+	if opts.pollInterval <= 0 {
+		opts.pollInterval = 30 * time.Second
+	}
+	nextPoll := time.Now()
 	for {
-		time.Sleep(500 * time.Millisecond)
+		now := time.Now()
+		if opts.poll != nil && !now.Before(nextPoll) {
+			if err := opts.poll(); err != nil {
+				fmt.Fprintf(os.Stderr, "github poll failed: %v\n", err)
+			}
+			nextPoll = now.Add(opts.pollInterval)
+		}
 		if err := readEventsFrom(path, offset, emit, &offset); err != nil {
 			return err
 		}
+		time.Sleep(500 * time.Millisecond)
 	}
+}
+
+func syncAttachedGitHub(ctx context.Context, repoRoot string) error {
+	store, err := thread.Open(repoRoot)
+	if err != nil {
+		return err
+	}
+	if store.GitHub == nil {
+		return nil
+	}
+	client := gh.NewClient(repoRoot)
+	threads, err := client.Threads(ctx, *store.GitHub)
+	if err != nil {
+		return err
+	}
+	_, err = store.SyncGitHubThreads(*store.GitHub, threads)
+	return err
 }
 
 func eventTextLine(line []byte) (string, error) {
@@ -768,6 +812,9 @@ func eventTextLine(line []byte) (string, error) {
 	parts := []string{e.ID, e.Type}
 	if e.ThreadID != "" {
 		parts = append(parts, "thread_id="+e.ThreadID)
+	}
+	if e.Source != "" {
+		parts = append(parts, "source="+string(e.Source))
 	}
 	if e.Actor != "" {
 		parts = append(parts, "actor="+string(e.Actor))

@@ -106,6 +106,7 @@ type Event struct {
 	ID        string    `json:"id"`
 	Type      string    `json:"type"`
 	ThreadID  string    `json:"thread_id,omitempty"`
+	Source    Source    `json:"source,omitempty"`
 	Actor     Actor     `json:"actor,omitempty"`
 	Status    Status    `json:"status,omitempty"`
 	Path      string    `json:"path,omitempty"`
@@ -521,6 +522,7 @@ func (s *Store) AttachGitHubPR(pr gh.AttachedPR) error {
 func (s *Store) SyncGitHubThreads(pr gh.AttachedPR, threads []gh.Thread) (int, error) {
 	seen := map[string]bool{}
 	count := 0
+	var events []Event
 	for _, ghThread := range threads {
 		if ghThread.Outdated || len(ghThread.Comments) == 0 {
 			continue
@@ -534,6 +536,7 @@ func (s *Store) SyncGitHubThreads(pr gh.AttachedPR, threads []gh.Thread) (int, e
 		updated := false
 		for i := range s.Threads {
 			if s.Threads[i].Source == SourceGitHub && s.Threads[i].GitHub != nil && s.Threads[i].GitHub.ThreadID == t.GitHub.ThreadID {
+				events = append(events, githubReplyEvents(s.Threads[i], t)...)
 				t.ReadMessageID = s.Threads[i].ReadMessageID
 				s.Threads[i] = t
 				updated = true
@@ -541,6 +544,7 @@ func (s *Store) SyncGitHubThreads(pr gh.AttachedPR, threads []gh.Thread) (int, e
 			}
 		}
 		if !updated {
+			events = append(events, githubThreadCreatedEvent(t))
 			s.Threads = append(s.Threads, t)
 		}
 	}
@@ -552,7 +556,51 @@ func (s *Store) SyncGitHubThreads(pr gh.AttachedPR, threads []gh.Thread) (int, e
 		filtered = append(filtered, t)
 	}
 	s.Threads = filtered
-	return count, s.Save()
+	if err := s.Save(); err != nil {
+		return count, err
+	}
+	for _, e := range events {
+		if err := s.appendEvent(e); err != nil {
+			return count, err
+		}
+	}
+	return count, nil
+}
+
+func githubThreadCreatedEvent(t Thread) Event {
+	msg := firstMessage(t)
+	return Event{Type: "thread.created", ThreadID: t.ID, Source: SourceGitHub, Actor: actorFromGitHubMessage(msg), Path: t.Path, Side: t.Side, LineStart: t.LineStart, LineEnd: t.LineEnd, DiffHash: t.DiffHash, Body: msg.Body}
+}
+
+func githubReplyEvents(previous, current Thread) []Event {
+	seen := map[string]bool{}
+	for _, msg := range previous.Messages {
+		if msg.ID != "" {
+			seen[msg.ID] = true
+		}
+	}
+	var events []Event
+	for _, msg := range current.Messages {
+		if msg.ID == "" || seen[msg.ID] {
+			continue
+		}
+		events = append(events, Event{Type: "thread.replied", ThreadID: current.ID, Source: SourceGitHub, Actor: actorFromGitHubMessage(msg), Path: current.Path, Side: current.Side, LineStart: current.LineStart, LineEnd: current.LineEnd, DiffHash: current.DiffHash, Body: msg.Body})
+	}
+	return events
+}
+
+func firstMessage(t Thread) Message {
+	if len(t.Messages) == 0 {
+		return Message{}
+	}
+	return t.Messages[0]
+}
+
+func actorFromGitHubMessage(msg Message) Actor {
+	if msg.AuthorLogin != "" {
+		return Actor(msg.AuthorLogin)
+	}
+	return ActorGitHub
 }
 
 func threadFromGitHubThread(pr gh.AttachedPR, ghThread gh.Thread) Thread {

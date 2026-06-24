@@ -67,13 +67,13 @@ func TestBuildAgentInboxFiltersSortsAndLimits(t *testing.T) {
 }
 
 func TestEventTextLineUsesExplicitKeys(t *testing.T) {
-	line := []byte(`{"id":"E1","type":"thread.created","thread_id":"T1","actor":"human","path":"internal/foo.go","side":"new","line_start":3,"line_end":5,"diff_hash":"abc123","body":"rename this\nextra detail","created_at":"2026-06-21T00:00:00Z"}`)
+	line := []byte(`{"id":"E1","type":"thread.created","thread_id":"T1","source":"github","actor":"alice","path":"internal/foo.go","side":"new","line_start":3,"line_end":5,"diff_hash":"abc123","body":"rename this\nextra detail","created_at":"2026-06-21T00:00:00Z"}`)
 
 	got, err := eventTextLine(line)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `E1 thread.created thread_id=T1 actor=human path="internal/foo.go" line_start=3 line_end=5 side=new diff_hash=abc123 body_preview="rename this"`
+	want := `E1 thread.created thread_id=T1 source=github actor=alice path="internal/foo.go" line_start=3 line_end=5 side=new diff_hash=abc123 body_preview="rename this"`
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}

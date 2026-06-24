@@ -1,8 +1,10 @@
 package thread
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,6 +57,50 @@ func TestSyncGitHubThreadsRemovesMissingAndOutdated(t *testing.T) {
 	if len(store.Threads) != 1 || store.Threads[0].ID != "local" {
 		t.Fatalf("stale github thread not removed / local removed: %#v", store.Threads)
 	}
+}
+
+func TestSyncGitHubThreadsEmitsGitHubCommentEvents(t *testing.T) {
+	store := tempStore(t)
+	pr := gh.AttachedPR{Owner: "owenps", Repo: "tdiff", Number: 12}
+	first := gh.Thread{ID: "thread1", Path: "main.go", Line: 20, Side: "RIGHT", Comments: []gh.Comment{{ID: "comment1", Body: "fix this", Author: gh.Author{Login: "alice"}, CreatedAt: time.Unix(1, 0), UpdatedAt: time.Unix(1, 0)}}}
+
+	if _, err := store.SyncGitHubThreads(pr, []gh.Thread{first}); err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.Comments = append(second.Comments, gh.Comment{ID: "reply1", Body: "done", Author: gh.Author{Login: "bob"}, CreatedAt: time.Unix(2, 0), UpdatedAt: time.Unix(2, 0)})
+	if _, err := store.SyncGitHubThreads(pr, []gh.Thread{second}); err != nil {
+		t.Fatal(err)
+	}
+
+	events := readStoreEvents(t, store)
+	if len(events) != 2 {
+		t.Fatalf("event count = %d, want 2: %#v", len(events), events)
+	}
+	if events[0].Type != "thread.created" || events[0].Source != SourceGitHub || events[0].Actor != Actor("alice") || events[0].Body != "fix this" {
+		t.Fatalf("bad create event: %#v", events[0])
+	}
+	if events[1].Type != "thread.replied" || events[1].Source != SourceGitHub || events[1].Actor != Actor("bob") || events[1].Body != "done" {
+		t.Fatalf("bad reply event: %#v", events[1])
+	}
+}
+
+func readStoreEvents(t *testing.T, store *Store) []Event {
+	t.Helper()
+	b, err := os.ReadFile(store.EventsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	events := make([]Event, 0, len(lines))
+	for _, line := range lines {
+		var event Event
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+	return events
 }
 
 func tempStore(t *testing.T) *Store {

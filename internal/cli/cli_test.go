@@ -130,3 +130,19 @@ func TestFreshnessUsesLegacySingleLineThread(t *testing.T) {
 		t.Fatalf("freshness = %q, want current", got)
 	}
 }
+
+func TestFreshnessTrustsGitHubActiveThread(t *testing.T) {
+	thread := thread.Thread{Source: thread.SourceGitHub, Path: "missing.go", Side: thread.SideNew, Line: 3}
+
+	if got := freshness(thread, nil); got != "current" {
+		t.Fatalf("freshness = %q, want current", got)
+	}
+}
+
+func TestFreshnessMarksGitHubOutdatedThreadStale(t *testing.T) {
+	thread := thread.Thread{Source: thread.SourceGitHub, Outdated: true, Path: "foo.go", Side: thread.SideNew, Line: 3}
+
+	if got := freshness(thread, []diff.File{{NewPath: "foo.go", Hunks: []diff.Hunk{{Lines: []diff.Line{{Kind: diff.Add, NewNo: 3}}}}}}); got != "stale" {
+		t.Fatalf("freshness = %q, want stale", got)
+	}
+}

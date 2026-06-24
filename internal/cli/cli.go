@@ -817,6 +817,9 @@ func freshness(t thread.Thread, files []diff.File) string {
 }
 
 func isThreadCurrent(t thread.Thread, files []diff.File) bool {
+	if t.Source == thread.SourceGitHub {
+		return !t.Outdated
+	}
 	return threadtarget.CurrentInFiles(t, files)
 }
 

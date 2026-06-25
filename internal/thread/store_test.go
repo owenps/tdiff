@@ -145,6 +145,23 @@ func TestUnreadForHumanTracksNonHumanLatestReply(t *testing.T) {
 	}
 }
 
+func TestClearThreadsRemovesAnnotationsAndReads(t *testing.T) {
+	store := tempStoreForStoreTest(t)
+	if err := store.Add(Thread{ID: "n1", Path: "a.go", Side: SideNew, Line: 1, Messages: []Message{{Actor: ActorHuman, Body: "first"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkThreadRead("n1"); err != nil {
+		t.Fatal(err)
+	}
+	count, err := store.ClearThreads()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || len(store.Threads) != 0 || len(store.ThreadReads) != 0 {
+		t.Fatalf("count=%d threads=%d reads=%d", count, len(store.Threads), len(store.ThreadReads))
+	}
+}
+
 func TestSyncGitHubThreadsPreservesReadUntilNewReply(t *testing.T) {
 	store := tempStoreForStoreTest(t)
 	pr := gh.AttachedPR{Owner: "o", Repo: "r", Number: 1}

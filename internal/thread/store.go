@@ -295,6 +295,16 @@ func (s *Store) Delete(id string) error {
 	return fmt.Errorf("thread not found")
 }
 
+func (s *Store) ClearThreads() (int, error) {
+	count := len(s.Threads)
+	s.Threads = nil
+	s.ThreadReads = map[string]string{}
+	if err := s.Save(); err != nil {
+		return count, err
+	}
+	return count, s.appendEvent(Event{Type: "threads.cleared"})
+}
+
 func (s *Store) ThreadsFor(path string) []Thread {
 	var out []Thread
 	for _, t := range s.Threads {

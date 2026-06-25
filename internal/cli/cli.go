@@ -108,6 +108,8 @@ func Run() error {
 			return runReview(ctx, os.Args[2:])
 		case "thread":
 			return runThread(ctx, os.Args[2:])
+		case "clear":
+			return runClear(ctx, os.Args[2:])
 		case "events":
 			return runEvents(ctx, os.Args[2:])
 		case "export":
@@ -136,6 +138,7 @@ func mainHelpText() string {
 
 Usage:
   tdiff [--base <ref>] [--staged|--unstaged] [--offline] [--debug]
+  tdiff clear
   tdiff review status|context|approve|unapprove|watch|events
   tdiff thread list|show|add|reply|resolve|reopen
   tdiff agent help|inbox [limit]|wait
@@ -504,6 +507,30 @@ func runReviewEvents(ctx context.Context, name string, args []string, followDefa
 		opts.poll = func() error { return syncAttachedGitHub(ctx, repoRoot) }
 	}
 	return streamEvents(loaded.store.EventsPath(), opts)
+}
+
+func runClear(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("tdiff clear", flag.ExitOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+	repo, err := git.Open(ctx)
+	if err != nil {
+		return err
+	}
+	store, err := thread.Open(repo.Root)
+	if err != nil {
+		return err
+	}
+	count, err := store.ClearThreads()
+	if err != nil {
+		return err
+	}
+	fmt.Printf("cleared %d annotations\n", count)
+	return nil
 }
 
 func runThread(ctx context.Context, args []string) error {

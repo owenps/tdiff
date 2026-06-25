@@ -16,6 +16,20 @@ import (
 	"github.com/owenps/tdiff/internal/threadworkflow"
 )
 
+type fakeViewedStore struct{ viewed map[string]string }
+
+func (s *fakeViewedStore) MarkViewed(path, diffHash string) error {
+	s.viewed[path] = diffHash
+	return nil
+}
+
+func (s *fakeViewedStore) ClearViewed(path string) error {
+	delete(s.viewed, path)
+	return nil
+}
+
+func (s *fakeViewedStore) IsViewed(path, diffHash string) bool { return s.viewed[path] == diffHash }
+
 func TestSidebarStatTruncatesThousands(t *testing.T) {
 	cases := map[int]string{
 		999:  "+999",
@@ -120,6 +134,24 @@ func TestRefreshLoadedKeepsCursorAfterStoreReload(t *testing.T) {
 
 	if m.currentPath() != "b.go" || m.session.LineIndex() != 2 {
 		t.Fatalf("path=%q line=%d", m.currentPath(), m.session.LineIndex())
+	}
+}
+
+func TestCollapsedHeaderShowsViewedOnlyWhenViewed(t *testing.T) {
+	file := diff.File{NewPath: "file.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+new"}}}}}
+	store := &fakeViewedStore{viewed: map[string]string{}}
+	session := review.NewSession([]diff.File{file})
+	session.SetStores(store, nil)
+	m := Model{store: &thread.Store{}, session: session, width: 80}
+
+	if got := xansi.Strip(m.renderDiffHeader(80)); strings.Contains(got, "viewed") || strings.Contains(got, "✓") {
+		t.Fatalf("unviewed header = %q", got)
+	}
+	if err := store.MarkViewed("file.go", diff.FileHash(file)); err != nil {
+		t.Fatal(err)
+	}
+	if got := xansi.Strip(m.renderDiffHeader(80)); !strings.Contains(got, "✓ viewed") {
+		t.Fatalf("viewed header = %q", got)
 	}
 }
 

@@ -1116,7 +1116,17 @@ func (m Model) renderDiffHeader(width int) string {
 	if stats != "" {
 		line += "  " + stats
 	}
-	return padRight(truncate(line, width), width)
+	if !m.session.IsViewed(m.currentPath()) {
+		return padRight(truncate(line, width), width)
+	}
+	right := dimStyle.Render("✓ viewed")
+	rightWidth := xansi.StringWidth(right)
+	if width <= rightWidth+2 {
+		return padRight(truncate(line, width), width)
+	}
+	left := truncate(line, width-rightWidth-2)
+	gap := max(2, width-xansi.StringWidth(left)-rightWidth)
+	return left + strings.Repeat(" ", gap) + right
 }
 
 func (m Model) renderStatus() string {

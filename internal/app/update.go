@@ -174,6 +174,15 @@ func (m Model) updateComposer(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc":
 			m.closeComposer()
 			return m, nil
+		case "ctrl+a":
+			m.editor.CursorStart()
+			return m, nil
+		case "ctrl+e":
+			m.editor.CursorEnd()
+			return m, nil
+		case "ctrl+c":
+			m.editor.Reset()
+			return m, nil
 		}
 	}
 	var cmd tea.Cmd

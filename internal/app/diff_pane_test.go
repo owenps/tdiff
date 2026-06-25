@@ -559,6 +559,28 @@ func TestComposerUsesBrandRail(t *testing.T) {
 	}
 }
 
+func TestComposerControlKeys(t *testing.T) {
+	m := diffPaneTestModel(false)
+	m.composing = true
+	m.editor.SetValue("reply body")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
+	m = updated.(Model)
+	if got := m.editor.LineInfo().CharOffset; got != 0 {
+		t.Fatalf("ctrl+a cursor = %d, want 0", got)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
+	m = updated.(Model)
+	if got := m.editor.LineInfo().CharOffset; got != len("reply body") {
+		t.Fatalf("ctrl+e cursor = %d, want end", got)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	m = updated.(Model)
+	if got := m.editor.Value(); got != "" || !m.composing {
+		t.Fatalf("ctrl+c value=%q composing=%t, want cleared and composing", got, m.composing)
+	}
+}
+
 func TestDiffPaneWrapsOnlySelectedLineWhenEnabled(t *testing.T) {
 	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@", Lines: []diff.Line{
 		{Kind: diff.Add, NewNo: 1, Text: "+one two three four five six seven eight"},

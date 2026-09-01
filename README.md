@@ -63,6 +63,7 @@ tdiff --staged
 tdiff --unstaged
 tdiff --offline
 tdiff --debug   # write .git/tdiff/debug.log
+tdiff clear     # reset local review state
 
 tdiff agent help
 tdiff agent inbox --json
@@ -99,6 +100,8 @@ tdiff stores review data locally in your repo:
 ```
 
 This includes review approval, threads, messages, viewed-file state, and GitHub PR metadata.
+
+Run `tdiff clear` to reset this active local review state. It does not change comments or review state on GitHub. Event history is retained.
 
 Run `tdiff --debug` to write integration/debug failures to `.git/tdiff/debug.log`.
 

@@ -295,14 +295,17 @@ func (s *Store) Delete(id string) error {
 	return fmt.Errorf("thread not found")
 }
 
-func (s *Store) ClearThreads() (int, error) {
+func (s *Store) ClearReview() (int, error) {
 	count := len(s.Threads)
+	s.Review = Review{}
+	s.GitHub = nil
 	s.Threads = nil
+	s.Viewed = nil
 	s.ThreadReads = map[string]string{}
 	if err := s.Save(); err != nil {
 		return count, err
 	}
-	return count, s.appendEvent(Event{Type: "threads.cleared"})
+	return count, s.appendEvent(Event{Type: "review.cleared"})
 }
 
 func (s *Store) ThreadsFor(path string) []Thread {

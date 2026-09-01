@@ -525,11 +525,11 @@ func runClear(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	count, err := store.ClearThreads()
+	count, err := store.ClearReview()
 	if err != nil {
 		return err
 	}
-	fmt.Printf("cleared %d annotations\n", count)
+	fmt.Printf("cleared local review state (%d annotations)\n", count)
 	return nil
 }
 

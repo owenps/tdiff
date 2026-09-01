@@ -160,7 +160,7 @@ func TestMarkThreadReadDoesNotSaveWhenAlreadyRead(t *testing.T) {
 	}
 }
 
-func TestClearThreadsRemovesAnnotationsAndReads(t *testing.T) {
+func TestClearReviewRemovesLocalReviewState(t *testing.T) {
 	store := tempStoreForStoreTest(t)
 	if err := store.Add(Thread{ID: "n1", Path: "a.go", Side: SideNew, Line: 1, Messages: []Message{{Actor: ActorHuman, Body: "first"}}}); err != nil {
 		t.Fatal(err)
@@ -168,12 +168,30 @@ func TestClearThreadsRemovesAnnotationsAndReads(t *testing.T) {
 	if err := store.MarkThreadRead("n1"); err != nil {
 		t.Fatal(err)
 	}
-	count, err := store.ClearThreads()
+	if err := store.Approve("hash"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AttachGitHubPR(gh.AttachedPR{Owner: "o", Repo: "r", Number: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkViewed("a.go", "hash"); err != nil {
+		t.Fatal(err)
+	}
+
+	count, err := store.ClearReview()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 || len(store.Threads) != 0 || len(store.ThreadReads) != 0 {
-		t.Fatalf("count=%d threads=%d reads=%d", count, len(store.Threads), len(store.ThreadReads))
+	if count != 1 || store.Review.ApprovedDiffHash != "" || store.GitHub != nil || len(store.Threads) != 0 || len(store.Viewed) != 0 || len(store.ThreadReads) != 0 {
+		t.Fatalf("state not cleared: count=%d store=%+v", count, store)
+	}
+
+	reopened, err := Open(filepath.Dir(filepath.Dir(filepath.Dir(store.Path()))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened.Review.ApprovedDiffHash != "" || reopened.GitHub != nil || len(reopened.Threads) != 0 || len(reopened.Viewed) != 0 || len(reopened.ThreadReads) != 0 {
+		t.Fatalf("cleared state not persisted: %+v", reopened)
 	}
 }
 

@@ -157,7 +157,7 @@ func (w Workflow) MarkerFor(t thread.Thread, line diff.Line) string {
 		return ""
 	}
 	if start == end || lineNo == start {
-		return "●"
+		return "∗"
 	}
 	if lineNo == end {
 		return "╰"

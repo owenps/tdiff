@@ -16,7 +16,7 @@ import (
 func TestThreadCardTitleShowsGitHubSource(t *testing.T) {
 	pane := diffPane{}
 	got := pane.threadCardTitle(thread.Thread{Source: thread.SourceGitHub, Messages: []thread.Message{{ID: "m1"}, {ID: "m2"}, {ID: "m3"}}})
-	if got != "github · 2 replies" {
+	if got != "thread · github · 2 replies" {
 		t.Fatalf("title = %q", got)
 	}
 }
@@ -43,8 +43,8 @@ func TestDiffPaneRendersUnreadThreadStartInRail(t *testing.T) {
 	m.session.SetStores(m.store, m.store)
 
 	out := xansi.Strip(m.renderDiff(4))
-	if !strings.Contains(out, "●") {
-		t.Fatalf("rendered diff missing unread thread start:\n%s", out)
+	if !strings.Contains(out, "∗") {
+		t.Fatalf("rendered diff missing thread start:\n%s", out)
 	}
 }
 
@@ -55,8 +55,8 @@ func TestDiffPaneRendersReadThreadStartInRail(t *testing.T) {
 	m.session.SetStores(m.store, m.store)
 
 	out := xansi.Strip(m.renderDiff(4))
-	if !strings.Contains(out, "○") {
-		t.Fatalf("rendered diff missing read thread start:\n%s", out)
+	if !strings.Contains(out, "∗") {
+		t.Fatalf("rendered diff missing thread start:\n%s", out)
 	}
 }
 
@@ -543,19 +543,123 @@ func TestReviewViewPadsToTerminalHeight(t *testing.T) {
 	}
 }
 
-func TestComposerUsesBrandRail(t *testing.T) {
+func TestComposerRendersInlineEditableBoxWithoutFooterOrIndent(t *testing.T) {
 	m := diffPaneTestModel(false)
 	m.width = 80
 	m.height = 20
 	m.composing = true
 	m.editor.SetValue("reply body")
 
-	out := xansi.Strip(m.View())
-	if !strings.Contains(out, "┃") || !strings.Contains(out, "reply body") {
-		t.Fatalf("composer missing rail:\n%s", out)
+	view := xansi.Strip(m.View())
+	viewLines := strings.Split(view, "\n")
+	if len(viewLines) != m.height {
+		t.Fatalf("composing view lines=%d, want %d", len(viewLines), m.height)
 	}
-	if got := m.editor.FocusedStyle.Prompt.GetForeground(); got != brandColor {
-		t.Fatalf("composer rail color = %v, want %v", got, brandColor)
+	if strings.Contains(viewLines[len(viewLines)-1], composerHint) {
+		t.Fatalf("composer hint still uses the footer:\n%s", view)
+	}
+	out := xansi.Strip(m.renderDiff(m.bodyHeight()))
+	if !strings.Contains(out, composerHint) {
+		t.Fatalf("editable box missing save/cancel hint:\n%s", out)
+	}
+	lines := strings.Split(out, "\n")
+	boxTop := -1
+	bodyLine := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, "╭") {
+			boxTop = i
+		}
+		if strings.Contains(line, "reply body") {
+			bodyLine = i
+			if !strings.HasPrefix(line, "│ ") {
+				t.Fatalf("draft text is outside its box: %q", line)
+			}
+		}
+	}
+	if strings.Contains(out, "┃") {
+		t.Fatalf("composer still has a separate text rail:\n%s", out)
+	}
+	if boxTop < 1 || bodyLine != boxTop+1 || !strings.Contains(lines[boxTop-1], "@@ -1 +1 @@") {
+		t.Fatalf("editable box is not inline after selected line:\n%s", out)
+	}
+}
+
+func TestConfirmedDraftBecomesIndentedThreadCard(t *testing.T) {
+	m := diffPaneTestModel(false)
+	m.width = 80
+	m.height = 20
+	m.store.Threads = nil
+	m.session.SetStores(m.store, m.store)
+	m.session.MoveLine(1, 10)
+	target, err := m.singleLineTarget()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.startNewThread(target)
+	m.editor.SetValue("reply body")
+
+	draft := xansi.Strip(m.renderDiff(m.bodyHeight()))
+	if !strings.Contains(draft, "\n╭") || !strings.Contains(draft, "\n│ reply body") || strings.Contains(draft, "┃") {
+		t.Fatalf("draft is not an unindented editable box:\n%s", draft)
+	}
+
+	m.store.Threads = []thread.Thread{{
+		ID:        "confirmed",
+		Path:      "foo.go",
+		Side:      target.Side,
+		LineStart: target.LineStart,
+		LineEnd:   target.LineEnd,
+		Messages:  []thread.Message{{Actor: thread.ActorHuman, Body: "reply body"}},
+	}}
+	m.closeComposer()
+	confirmed := xansi.Strip(m.renderDiff(m.bodyHeight()))
+	if !strings.Contains(confirmed, "\n  ╭") || !strings.Contains(confirmed, "you  reply body") {
+		t.Fatalf("confirmed comment is not an indented thread card:\n%s", confirmed)
+	}
+}
+
+func TestExistingThreadEditsInsideItsCard(t *testing.T) {
+	m := diffPaneTestModel(false)
+	m.width = 80
+	m.height = 20
+	m.store.Threads[0].Messages = []thread.Message{{Actor: thread.ActorHuman, Body: "original"}}
+	m.session.SetStores(m.store, m.store)
+	m.session.MoveLine(1, 10)
+	selected, ok := m.selectedThread()
+	if !ok {
+		t.Fatal("expected selected thread")
+	}
+	if err := m.startEditThread(selected); err != nil {
+		t.Fatal(err)
+	}
+	m.editor.SetValue("edited in place")
+
+	out := xansi.Strip(m.renderDiff(m.bodyHeight()))
+	if strings.Count(out, "╭") != 1 || !strings.Contains(out, "\n  ╭") || !strings.Contains(out, composerHint) || !strings.Contains(out, "\n  │ edited in place") {
+		t.Fatalf("editor is not inside the existing thread card:\n%s", out)
+	}
+	if strings.Contains(out, "original") || strings.Contains(out, "\n╭") {
+		t.Fatalf("editor rendered a second card instead of replacing the message:\n%s", out)
+	}
+}
+
+func TestThreadReplyEditsInsideItsCard(t *testing.T) {
+	m := diffPaneTestModel(false)
+	m.width = 80
+	m.height = 20
+	m.store.Threads[0].Messages = []thread.Message{{Actor: thread.ActorHuman, Body: "original"}}
+	m.session.SetStores(m.store, m.store)
+	m.session.MoveLine(1, 10)
+	selected, ok := m.selectedThread()
+	if !ok {
+		t.Fatal("expected selected thread")
+	}
+	m.startReplyThread(selected)
+	m.editor.SetValue("reply in place")
+
+	out := xansi.Strip(m.renderDiff(m.bodyHeight()))
+	if strings.Count(out, "╭") != 1 || !strings.Contains(out, "you  original") || !strings.Contains(out, "\n  │ reply in place") {
+		t.Fatalf("reply editor is not inside the existing thread card:\n%s", out)
 	}
 }
 
@@ -908,8 +1012,7 @@ func TestDiffPaneKeepsSyntaxHighlightingOnAddDeleteLines(t *testing.T) {
 func diffPaneTestModel(split bool) Model {
 	editor := textarea.New()
 	editor.ShowLineNumbers = false
-	editor.FocusedStyle.Prompt = threadStyle
-	editor.BlurredStyle.Prompt = threadStyle
+	editor.Prompt = ""
 	file := diff.File{NewPath: "foo.go", Hunks: []diff.Hunk{{Header: "@@ -1 +1 @@", Lines: []diff.Line{
 		{Kind: diff.Delete, OldNo: 1, Text: "-old"},
 		{Kind: diff.Add, NewNo: 1, Text: "+new"},

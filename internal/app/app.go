@@ -63,7 +63,6 @@ type Model struct {
 	refreshing        bool
 	status            string
 	statusID          int
-	composerBaseView  string
 	viewCache         map[string]string
 	statsCache        map[string]diffStats
 	syntaxCache       map[string]string
@@ -90,8 +89,7 @@ func New(ctx context.Context, cfg Config) (Model, error) {
 	m.editor.CharLimit = 4000
 	m.editor.SetHeight(5)
 	m.editor.ShowLineNumbers = false
-	m.editor.FocusedStyle.Prompt = threadStyle
-	m.editor.BlurredStyle.Prompt = threadStyle
+	m.editor.Prompt = ""
 	if err := m.reload(ctx); err != nil {
 		return Model{}, err
 	}
@@ -181,26 +179,35 @@ func (m Model) View() string {
 	if !m.ready() {
 		return m.loadingView()
 	}
-	if m.composing {
-		view := m.composerBaseView
-		if view == "" {
-			view = m.reviewView()
-		}
-		return view + "\n" + m.renderComposer()
-	}
 	if m.prPicker.Active() {
 		return m.reviewView() + "\n" + m.prPicker.View(m.width, m.loadingFrame)
 	}
 
-	view := m.reviewView()
-	if m.showHelp {
-		return overlay(view, m.renderHelp(), m.width, m.height)
-	}
-	return view
+	return m.reviewView()
 }
 
-func (m Model) renderComposer() string {
-	return m.editor.View() + "\n" + dimStyle.Render("⌥+enter save · esc cancel")
+const composerHint = "⌥+enter save · esc cancel"
+
+func (m Model) composerEditorRows(width int) []string {
+	editor := m.editor
+	editor.Prompt = ""
+	editor.SetWidth(max(1, width))
+	return strings.Split(editor.View(), "\n")
+}
+
+func (m Model) renderComposer(width int) string {
+	width = max(4, width)
+	innerWidth := width - 4
+	borderWidth := width - 2
+	label := truncate("─ "+composerHint+" ", borderWidth)
+	top := "╭" + label + strings.Repeat("─", max(0, borderWidth-xansi.StringWidth(label))) + "╮"
+	rows := []string{threadStyle.Render(top)}
+	for _, line := range m.composerEditorRows(innerWidth) {
+		body := padRight(truncate(line, innerWidth), innerWidth)
+		rows = append(rows, threadStyle.Render("│ ")+body+threadStyle.Render(" │"))
+	}
+	rows = append(rows, threadStyle.Render("╰"+strings.Repeat("─", width-2)+"╯"))
+	return strings.Join(rows, "\n")
 }
 
 func (m Model) ready() bool {
@@ -213,28 +220,51 @@ func (m Model) loadingView() string {
 }
 
 func (m Model) reviewView() string {
+	bodyHeight := m.bodyHeight()
+	var body string
 	if len(m.session.Files()) == 0 {
 		if len(m.session.AllFiles()) > 0 {
-			return dimStyle.Render("no files match filters · press u/m") + "\n"
+			body = dimStyle.Render("no files match filters · press u/m")
+		} else {
+			body = dimStyle.Render("clean tree · nothing to review")
 		}
-		return dimStyle.Render("clean tree · nothing to review") + "\n"
-	}
-	bodyHeight := m.bodyHeight()
-	diffHeight := bodyHeight
-	var header string
-	if m.hideSidebar {
-		diffHeight = max(1, bodyHeight-1)
-		header = m.renderDiffHeader(m.width)
-	}
-	diffPane := m.renderDiff(diffHeight)
-	body := diffPane
-	if m.hideSidebar {
-		body = header + "\n" + diffPane
 	} else {
-		sidebar := m.renderSidebar(bodyHeight)
-		body = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, diffPane)
+		header := m.renderDiffHeader(m.diffWidth())
+		diffPane := m.renderDiff(m.diffContentHeight())
+		diffColumn := header + "\n" + diffPane
+		body = diffColumn
+		if m.sidebarVisible() {
+			sidebar := m.renderSidebar(bodyHeight)
+			body = lipgloss.JoinHorizontal(lipgloss.Top, sidebar, diffColumn)
+		}
+	}
+	body = padBlockHeight(body, bodyHeight, m.reviewWidth())
+	if m.helpVisible() {
+		body = lipgloss.JoinHorizontal(lipgloss.Top, body, m.renderHelp(bodyHeight))
 	}
 	return padBlockHeight(body, bodyHeight, m.width) + "\n" + m.renderStatus()
+}
+
+func (m Model) helpVisible() bool {
+	return m.showHelp && !m.prPicker.Active()
+}
+
+func (m Model) reviewWidth() int {
+	return max(1, m.width-m.helpPaneWidth())
+}
+
+func (m Model) helpPaneWidth() int {
+	if !m.helpVisible() || m.width < 2 {
+		return 0
+	}
+	return min(helpPaneMaxWidth, max(1, m.width/2))
+}
+
+func (m Model) sidebarVisible() bool {
+	if m.hideSidebar {
+		return false
+	}
+	return !m.helpVisible() || m.reviewWidth() >= sidebarWidth+2+minDiffWidth
 }
 
 func (m *Model) reload(ctx context.Context) error {
@@ -305,8 +335,8 @@ func (m *Model) restoreCursor(anchor cursorAnchor) {
 			}
 		}
 	}
-	m.session.JumpToIndex(fileIdx, lineIdx, m.bodyHeight())
-	m.ensureSplitCursorVisible(m.bodyHeight())
+	m.session.JumpToIndex(fileIdx, lineIdx, m.diffContentHeight())
+	m.ensureSplitCursorVisible(m.diffContentHeight())
 }
 
 func (m *Model) resetFileHashes(files []diff.File) {
@@ -504,12 +534,12 @@ func (m *Model) startEditThread(t thread.Thread) error {
 	if !thread.CanEditLatestMessage(t) {
 		return fmt.Errorf("can only edit latest local message")
 	}
-	m.composerBaseView = m.reviewView()
 	m.editingThreadID = t.ID
 	m.replyingThreadID = ""
 	m.pendingTarget = threadworkflow.Target{}
 	m.editor.Reset()
 	m.editor.Placeholder = "edit latest reply…"
+	m.editor.SetWidth(m.diffWidth())
 	m.editor.SetValue(thread.LastMessage(t).Body)
 	m.composing = true
 	m.editor.Focus()
@@ -517,23 +547,23 @@ func (m *Model) startEditThread(t thread.Thread) error {
 }
 
 func (m *Model) startReplyThread(t thread.Thread) {
-	m.composerBaseView = m.reviewView()
 	m.editingThreadID = ""
 	m.replyingThreadID = t.ID
 	m.pendingTarget = threadworkflow.Target{}
 	m.editor.Reset()
 	m.editor.Placeholder = "reply…"
+	m.editor.SetWidth(m.diffWidth())
 	m.composing = true
 	m.editor.Focus()
 }
 
 func (m *Model) startNewThread(target threadworkflow.Target) {
-	m.composerBaseView = m.reviewView()
 	m.editingThreadID = ""
 	m.replyingThreadID = ""
 	m.pendingTarget = target
 	m.editor.Reset()
 	m.editor.Placeholder = "add review comment…"
+	m.editor.SetWidth(m.diffWidth())
 	m.composing = true
 	m.editor.Focus()
 }
@@ -708,9 +738,9 @@ func threadBadgeText(count, unread int) string {
 		return ""
 	}
 	if unread > 0 {
-		return fmt.Sprintf("●%d", unread)
+		return fmt.Sprintf("∗%d", unread)
 	}
-	return fmt.Sprintf("○%d", count)
+	return fmt.Sprintf("∗%d", count)
 }
 
 func threadBadgeView(count, unread int) string {
@@ -732,14 +762,14 @@ func sidebarHeader(stats, threads string) string {
 	return strings.Join(parts, " ")
 }
 
-func selectedSidebarLine(prefix, viewed, changed string, nameW int, path, added, deleted, threadBadge string, threadW int) string {
+func selectedSidebarLine(prefix, viewed, status string, statusKind diff.Kind, nameW int, path, added, deleted, threadBadge string, threadW int) string {
 	rail := selectedStyle.Render(prefix)
 	if strings.Contains(prefix, "▌") {
 		rail = selectedThreadStyle.Render("▌") + selectedStyle.Render(" ")
 	}
 	line := rail +
 		selectedStyle.Render(viewed+" ") +
-		selectedThreadStyle.Render(changed+" ") +
+		selectedFileStatus(status, statusKind) + selectedStyle.Render(" ") +
 		sidebarPath(path, nameW, true, viewed == "✓") +
 		selectedStyle.Render(" ") +
 		selectedAddStyle.Render(added) +
@@ -748,6 +778,33 @@ func selectedSidebarLine(prefix, viewed, changed string, nameW int, path, added,
 		selectedStyle.Render(" ") +
 		selectedSidebarThreadView(threadBadge, threadW)
 	return padRightStyled(line, sidebarWidth, selectedStyle)
+}
+
+func fileStatus(f diff.File, changed bool) (string, diff.Kind) {
+	switch {
+	case f.OldPath == "/dev/null":
+		return "+", diff.Add
+	case f.NewPath == "/dev/null":
+		return "−", diff.Delete
+	case changed:
+		return "●", diff.Meta
+	default:
+		return " ", diff.Context
+	}
+}
+
+func sidebarFileStatus(status string, kind diff.Kind) string {
+	if kind == diff.Meta {
+		return threadStyle.Render(status)
+	}
+	return colorLine(kind, status)
+}
+
+func selectedFileStatus(status string, kind diff.Kind) string {
+	if kind == diff.Meta {
+		return selectedThreadStyle.Render(status)
+	}
+	return selectedColorLine(kind, status)
 }
 
 func sidebarThreadView(badge string, width int) string {
@@ -900,22 +957,22 @@ func (m *Model) jumpTop() {
 }
 
 func (m *Model) jumpBottom() {
-	m.session.JumpBottom(m.bodyHeight())
-	m.ensureSplitCursorVisible(m.bodyHeight())
+	m.session.JumpBottom(m.diffContentHeight())
+	m.ensureSplitCursorVisible(m.diffContentHeight())
 }
 
 func (m *Model) nextHunk() {
-	if !m.session.NextHunk(m.bodyHeight()) {
+	if !m.session.NextHunk(m.diffContentHeight()) {
 		m.status = "no next hunk"
 	}
-	m.ensureSplitCursorVisible(m.bodyHeight())
+	m.ensureSplitCursorVisible(m.diffContentHeight())
 }
 
 func (m *Model) prevHunk() {
-	if !m.session.PrevHunk(m.bodyHeight()) {
+	if !m.session.PrevHunk(m.diffContentHeight()) {
 		m.status = "no previous hunk"
 	}
-	m.ensureSplitCursorVisible(m.bodyHeight())
+	m.ensureSplitCursorVisible(m.diffContentHeight())
 }
 
 func (m *Model) nextThread() {
@@ -928,7 +985,7 @@ func (m *Model) prevThread() {
 
 func (m *Model) jumpThread(delta int) {
 	before := m.currentPath()
-	idx, total, ok := m.session.JumpThread(delta, m.bodyHeight())
+	idx, total, ok := m.session.JumpThread(delta, m.diffContentHeight())
 	if !ok {
 		m.status = "no threads"
 		return
@@ -941,14 +998,14 @@ func (m *Model) jumpThread(delta int) {
 }
 
 func (m *Model) jumpToFileLine(line int) bool {
-	ok := m.session.JumpToFileLine(line, m.bodyHeight())
-	m.ensureSplitCursorVisible(m.bodyHeight())
+	ok := m.session.JumpToFileLine(line, m.diffContentHeight())
+	m.ensureSplitCursorVisible(m.diffContentHeight())
 	return ok
 }
 
 func (m *Model) ensureCursorVisible() {
-	m.session.EnsureVisible(m.bodyHeight())
-	m.ensureSplitCursorVisible(m.bodyHeight())
+	m.session.EnsureVisible(m.diffContentHeight())
+	m.ensureSplitCursorVisible(m.diffContentHeight())
 }
 
 func (m Model) bodyHeight() int {
@@ -1002,10 +1059,7 @@ func (m Model) renderSidebar(height int) string {
 		if m.session.IsViewed(path) {
 			viewed = "✓"
 		}
-		changed := " "
-		if m.changedFiles[path] {
-			changed = "◆"
-		}
+		status, statusKind := fileStatus(f, m.changedFiles[path])
 		stats := m.fileStats(f)
 		threadCount := m.threadCount(path)
 		threadBadge := threadBadgeText(threadCount, m.unreadThreadCount(path))
@@ -1013,9 +1067,9 @@ func (m Model) renderSidebar(height int) string {
 		deletedText := fmt.Sprintf("%*s", delW, sidebarStat("-", stats.Deleted))
 		added := addStyle.Render(addedText)
 		deleted := deleteStyle.Render(deletedText)
-		line := fmt.Sprintf("%s%s %s %s %s %s %s", prefix, viewed, threadStyle.Render(changed), sidebarPath(path, nameW, false, viewed == "✓"), added, deleted, sidebarThreadView(threadBadge, threadW))
+		line := fmt.Sprintf("%s%s %s %s %s %s %s", prefix, viewed, sidebarFileStatus(status, statusKind), sidebarPath(path, nameW, false, viewed == "✓"), added, deleted, sidebarThreadView(threadBadge, threadW))
 		if i == fileIdx {
-			line = selectedSidebarLine(prefix, viewed, changed, nameW, path, addedText, deletedText, threadBadge, threadW)
+			line = selectedSidebarLine(prefix, viewed, status, statusKind, nameW, path, addedText, deletedText, threadBadge, threadW)
 		} else if viewed == "✓" {
 			line = dimStyle.Render(line)
 		}
@@ -1107,26 +1161,32 @@ func (m Model) renderThreadPreview(maxRows int) []string {
 }
 
 func (m Model) renderDiffHeader(width int) string {
-	path := compactPath(m.currentPath(), max(12, width-18))
+	width = max(1, width)
+	pathRows := strings.Split(strings.TrimSuffix(xansi.Hardwrap(m.currentPath(), width, false), "\n"), "\n")
+	rows := make([]string, 0, len(pathRows)+1)
+	for _, row := range pathRows {
+		rows = append(rows, padRight(titleStyle.Render(row), width))
+	}
+
 	stats := m.statsView(m.fileStats(m.session.Files()[m.session.FileIndex()]))
 	if threads := m.threadCount(m.currentPath()); threads > 0 {
 		stats = strings.TrimSpace(stats + " " + threadBadgeView(threads, m.unreadThreadCount(m.currentPath())))
 	}
-	line := titleStyle.Render(path)
-	if stats != "" {
-		line += "  " + stats
+	viewed := ""
+	if m.session.IsViewed(m.currentPath()) {
+		viewed = dimStyle.Render("✓ viewed")
 	}
-	if !m.session.IsViewed(m.currentPath()) {
-		return padRight(truncate(line, width), width)
+	if stats != "" || viewed != "" {
+		stats = truncate(stats, max(0, width-xansi.StringWidth(viewed)-2))
+		gap := max(0, width-xansi.StringWidth(stats)-xansi.StringWidth(viewed))
+		rows = append(rows, stats+strings.Repeat(" ", gap)+viewed)
 	}
-	right := dimStyle.Render("✓ viewed")
-	rightWidth := xansi.StringWidth(right)
-	if width <= rightWidth+2 {
-		return padRight(truncate(line, width), width)
-	}
-	left := truncate(line, width-rightWidth-2)
-	gap := max(2, width-xansi.StringWidth(left)-rightWidth)
-	return left + strings.Repeat(" ", gap) + right
+	return strings.Join(rows, "\n")
+}
+
+func (m Model) diffContentHeight() int {
+	headerHeight := strings.Count(m.renderDiffHeader(m.diffWidth()), "\n") + 1
+	return max(1, m.bodyHeight()-headerHeight)
 }
 
 func (m Model) renderStatus() string {
@@ -1244,7 +1304,7 @@ func (m Model) footerHints() string {
 		return "j/k extend · a add thread · r cancel"
 	}
 	if m.showHelp {
-		return "? close"
+		return "? hide"
 	}
 	if _, ok := m.selectedThread(); ok {
 		return "z resolve · enter reply · e edit · d delete · ]t/[t threads · y copy"
@@ -1252,7 +1312,7 @@ func (m Model) footerHints() string {
 	return "a add thread · A approve · r range · v viewed · ? help"
 }
 
-func (m Model) renderHelp() string {
+func (m Model) renderHelp(height int) string {
 	lines := []string{
 		"nav",
 		"  j/k        line up/down",
@@ -1286,21 +1346,33 @@ func (m Model) renderHelp() string {
 		"  L          line numbers",
 		"  W          whitespace",
 		"  R          refresh diff",
-		"  ?          close help",
+		"  ?          hide help",
 	}
-	boxWidth := min(56, max(36, m.width-6))
-	return helpBox("help", lines, boxWidth)
+	return helpBox("help", lines, m.helpPaneWidth(), height)
 }
 
-func helpBox(title string, lines []string, width int) string {
-	contentWidth := max(1, width-4)
-	titleText := " " + title + " "
-	topFill := max(0, width-2-xansi.StringWidth(titleText))
-	rows := []string{helpBorderStyle.Render("┌" + titleText + strings.Repeat("─", topFill) + "┐")}
-	for _, line := range lines {
-		rows = append(rows, helpBorderStyle.Render("│ ")+helpBgStyle.Render(padRight(truncate(line, contentWidth), contentWidth))+helpBorderStyle.Render(" │"))
+func helpBox(title string, lines []string, width, height int) string {
+	if width < 4 || height <= 0 {
+		return padBlockHeight(truncate(title, width), height, width)
 	}
-	rows = append(rows, helpBorderStyle.Render("└"+strings.Repeat("─", max(0, width-2))+"┘"))
+	contentWidth := width - 4
+	titleText := truncate(" "+title+" ", width-2)
+	topFill := max(0, width-2-xansi.StringWidth(titleText))
+	top := helpBorderStyle.Render("┌" + titleText + strings.Repeat("─", topFill) + "┐")
+	bottom := helpBorderStyle.Render("└" + strings.Repeat("─", width-2) + "┘")
+	if height == 1 {
+		return top
+	}
+
+	rows := []string{top}
+	for i := 0; i < height-2; i++ {
+		line := ""
+		if i < len(lines) {
+			line = lines[i]
+		}
+		rows = append(rows, helpBorderStyle.Render("│ ")+padRight(truncate(line, contentWidth), contentWidth)+helpBorderStyle.Render(" │"))
+	}
+	rows = append(rows, bottom)
 	return strings.Join(rows, "\n")
 }
 
@@ -1325,6 +1397,8 @@ func (m *Model) saveThread() error {
 
 const (
 	sidebarWidth            = 38
+	minDiffWidth            = 40
+	helpPaneMaxWidth        = 48
 	sidebarMinFileRows      = 8
 	sidebarMinThreadRows    = 6
 	sidebarThreadMaxRows    = 24
@@ -1376,9 +1450,7 @@ var (
 	deleteStyle             = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 	selectedDeleteStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Background(selectedBg)
 	rangeDeleteStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Background(rangeBg)
-	helpStyle               = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(brandColor).Background(lipgloss.Color("235")).Padding(1, 2)
-	helpBorderStyle         = lipgloss.NewStyle().Foreground(brandColor).Background(lipgloss.Color("235"))
-	helpBgStyle             = lipgloss.NewStyle().Background(lipgloss.Color("235"))
+	helpBorderStyle         = lipgloss.NewStyle().Foreground(brandColor)
 )
 
 func colorLine(kind diff.Kind, s string) string {
@@ -1412,35 +1484,6 @@ func rangeColorLine(kind diff.Kind, s string) string {
 	default:
 		return rangeStyle.Render(s)
 	}
-}
-
-func overlay(base, modal string, width, height int) string {
-	if width <= 0 || height <= 0 {
-		return modal
-	}
-	baseLines := strings.Split(base, "\n")
-	for len(baseLines) < height {
-		baseLines = append(baseLines, "")
-	}
-	if len(baseLines) > height {
-		baseLines = baseLines[:height]
-	}
-
-	modalLines := strings.Split(modal, "\n")
-	modalW := 0
-	for _, line := range modalLines {
-		modalW = max(modalW, xansi.StringWidth(line))
-	}
-	left := max(0, (width-modalW)/2)
-	top := max(0, (height-len(modalLines))/2)
-	for i, line := range modalLines {
-		row := top + i
-		if row >= len(baseLines) {
-			break
-		}
-		baseLines[row] = padRight(strings.Repeat(" ", left)+padRight(line, modalW), width)
-	}
-	return strings.Join(baseLines, "\n")
 }
 
 func padBlockHeight(s string, height, width int) string {

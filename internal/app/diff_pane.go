@@ -47,11 +47,8 @@ func newThreadMarkers(threads []thread.Thread) threadMarkers {
 	return markers
 }
 
-func threadGlyph(t thread.Thread) string {
-	if thread.UnreadForHuman(t) {
-		return "●"
-	}
-	return "○"
+func threadGlyph(thread.Thread) string {
+	return "∗"
 }
 
 func (m threadMarkers) markerForLine(line diff.Line) string {
@@ -84,6 +81,11 @@ type diffPane struct {
 	inlineThreads     bool
 	selectedThread    thread.Thread
 	hasSelectedThread bool
+	composerRows      []string
+	composerBodyRows  []string
+	composerThreadID  string
+	composerEditing   bool
+	composerAnchor    int
 }
 
 func (m Model) renderDiff(height int) string {
@@ -91,11 +93,14 @@ func (m Model) renderDiff(height int) string {
 }
 
 func (m Model) diffWidth() int {
-	width := max(40, m.width-sidebarWidth-2)
-	if m.hideSidebar {
-		width = max(40, m.width)
+	width := m.reviewWidth()
+	if m.sidebarVisible() {
+		width -= sidebarWidth + 2
 	}
-	return width
+	if m.helpVisible() {
+		return max(1, width)
+	}
+	return max(minDiffWidth, width)
 }
 
 func (m Model) diffPane(width int) diffPane {
@@ -111,7 +116,7 @@ func (m Model) diffPane(width int) diffPane {
 		splitRows = m.splitNavForCurrentFile().rows
 	}
 	selectedThread, hasSelectedThread := m.selectedThread()
-	return diffPane{
+	pane := diffPane{
 		path:              path,
 		width:             width,
 		split:             m.split,
@@ -130,6 +135,39 @@ func (m Model) diffPane(width int) diffPane {
 		selectedThread:    selectedThread,
 		hasSelectedThread: hasSelectedThread,
 	}
+	if m.composing {
+		pane.composerAnchor = m.session.LineIndex()
+		pane.composerThreadID = m.editingThreadID
+		pane.composerEditing = m.editingThreadID != ""
+		if pane.composerThreadID == "" {
+			pane.composerThreadID = m.replyingThreadID
+		}
+		for _, t := range fileThreads {
+			if t.ID == pane.composerThreadID {
+				if anchor := pane.threadAnchorIndex(t); anchor >= 0 {
+					pane.composerAnchor = anchor
+				}
+				break
+			}
+		}
+		if m.pendingTarget.LineStart > 0 {
+			target := thread.Thread{
+				Path:      path,
+				Side:      m.pendingTarget.Side,
+				LineStart: m.pendingTarget.LineStart,
+				LineEnd:   m.pendingTarget.LineEnd,
+			}
+			if anchor := pane.threadAnchorIndex(target); anchor >= 0 {
+				pane.composerAnchor = anchor
+			}
+		}
+		if pane.composerThreadID == "" {
+			pane.composerRows = strings.Split(m.renderComposer(width), "\n")
+		} else {
+			pane.composerBodyRows = m.composerEditorRows(max(1, width-6))
+		}
+	}
+	return pane
 }
 
 func (m Model) syntaxAllowed(lineCount int) bool {
@@ -191,8 +229,9 @@ type splitNav struct {
 }
 
 func (m *Model) moveLine(delta int) {
+	height := m.diffContentHeight()
 	if !m.split {
-		m.session.MoveLine(delta, m.bodyHeight())
+		m.session.MoveLine(delta, height)
 		return
 	}
 	nav := m.splitNavForCurrentFile()
@@ -202,7 +241,7 @@ func (m *Model) moveLine(delta int) {
 	current := m.session.LineIndex()
 	rowIdx, ok := nav.lineToRow[current]
 	if !ok {
-		m.session.MoveLine(delta, m.bodyHeight())
+		m.session.MoveLine(delta, height)
 		return
 	}
 	targetLine := -1
@@ -216,11 +255,11 @@ func (m *Model) moveLine(delta int) {
 		return
 	}
 	if m.session.RangeActive() {
-		m.session.JumpToLine(targetLine, m.bodyHeight())
+		m.session.JumpToLine(targetLine, height)
 	} else {
-		m.session.JumpToIndex(m.session.FileIndex(), targetLine, m.bodyHeight())
+		m.session.JumpToIndex(m.session.FileIndex(), targetLine, height)
 	}
-	m.ensureSplitCursorVisible(m.bodyHeight())
+	m.ensureSplitCursorVisible(height)
 }
 
 func (m Model) splitNavForCurrentFile() splitNav {
@@ -452,21 +491,36 @@ type splitVisualRow struct {
 }
 
 func (p diffPane) inlineThreadCards(height int) map[int][]string {
-	if !p.inlineThreads || height < inlineThreadMinScreenRows || p.width < 24 {
+	showThreads := p.inlineThreads && height >= inlineThreadMinScreenRows && p.width >= 24
+	if !showThreads && !p.hasComposer() {
 		return nil
 	}
 	cards := make(map[int][]string)
 	for _, t := range p.threads {
+		editing := t.ID == p.composerThreadID
+		if !showThreads && !editing {
+			continue
+		}
 		anchor := p.threadAnchorIndex(t)
 		if anchor < 0 {
 			continue
 		}
 		rows := p.threadCardRows(t)
+		if editing {
+			rows = p.editableThreadCardRows(t)
+		}
 		if len(rows) > 0 {
 			cards[anchor] = append(cards[anchor], rows...)
 		}
 	}
+	if p.composerThreadID == "" && p.composerAnchor >= 0 && len(p.composerRows) > 0 {
+		cards[p.composerAnchor] = append(cards[p.composerAnchor], p.composerRows...)
+	}
 	return cards
+}
+
+func (p diffPane) hasComposer() bool {
+	return len(p.composerRows) > 0 || len(p.composerBodyRows) > 0
 }
 
 func lineVisualRows(lineCount int, cards map[int][]string) []lineVisualRow {
@@ -572,22 +626,29 @@ func visibleLineRange(rows []lineVisualRow) (int, int) {
 }
 
 func (p diffPane) selectedLineCardEnd(rows []lineVisualRow, cards map[int][]string) int {
-	if !p.hasSelectedThread {
-		return -1
+	anchor := p.composerAnchor
+	if !p.hasComposer() {
+		if !p.hasSelectedThread {
+			return -1
+		}
+		anchor = p.threadAnchorIndex(p.selectedThread)
 	}
-	anchor := p.threadAnchorIndex(p.selectedThread)
 	cardRows := cards[anchor]
-	if len(cardRows) == 0 {
+	if anchor < 0 || len(cardRows) == 0 {
 		return -1
 	}
 	return visualIndexForLine(rows, anchor) + len(cardRows)
 }
 
 func (p diffPane) selectedSplitCardEnd(rows []splitVisualRow, cards map[int][]string, splitRows []splitRow) int {
-	if !p.hasSelectedThread {
-		return -1
+	lineAnchor := p.composerAnchor
+	if !p.hasComposer() {
+		if !p.hasSelectedThread {
+			return -1
+		}
+		lineAnchor = p.threadAnchorIndex(p.selectedThread)
 	}
-	anchor := splitRowIndexForLine(splitRows, p.threadAnchorIndex(p.selectedThread))
+	anchor := splitRowIndexForLine(splitRows, lineAnchor)
 	cardRows := cards[anchor]
 	if anchor < 0 || len(cardRows) == 0 {
 		return -1
@@ -631,8 +692,33 @@ func (p diffPane) threadCardRows(t thread.Thread) []string {
 	return rows
 }
 
+func (p diffPane) editableThreadCardRows(t thread.Thread) []string {
+	if p.width < 10 {
+		return nil
+	}
+	cardW := max(10, p.width-2)
+	innerW := max(1, cardW-4)
+	messages := t.Messages
+	if p.composerEditing && len(messages) > 0 {
+		messages = messages[:len(messages)-1]
+	}
+	bodyRows := []string{}
+	if len(messages) > 0 {
+		bodyRows = inlineThreadRows(messages, innerW)
+		bodyRows = append(bodyRows, "")
+	}
+	bodyRows = append(bodyRows, p.composerBodyRows...)
+
+	rows := []string{threadStyle.Render(p.threadCardBorder("╭", composerHint, "╮", cardW))}
+	for _, row := range bodyRows {
+		rows = append(rows, p.threadCardBody(row, cardW))
+	}
+	rows = append(rows, threadStyle.Render(p.threadCardBorder("╰", "", "╯", cardW)))
+	return rows
+}
+
 func (p diffPane) threadCardTitle(t thread.Thread) string {
-	parts := []string{}
+	parts := []string{"thread"}
 	if t.Source == thread.SourceGitHub {
 		parts = append(parts, "github")
 	}
@@ -672,7 +758,7 @@ func (p diffPane) threadCardBody(text string, width int) string {
 		body = truncate(body, innerW)
 	}
 	pad := strings.Repeat(" ", max(0, innerW-xansi.StringWidth(body)))
-	return dimStyle.Render("  │ ") + body + dimStyle.Render(pad+" │")
+	return threadStyle.Render("  │ ") + body + dimStyle.Render(pad) + threadStyle.Render(" │")
 }
 
 func inlineThreadRows(messages []thread.Message, width int) []string {

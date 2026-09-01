@@ -53,7 +53,7 @@ func TestThreadAtAndMarkerForRange(t *testing.T) {
 	if !ok || thread.ID != "n1" {
 		t.Fatalf("thread=%+v ok=%t", thread, ok)
 	}
-	if got := w.MarkerFor(thread, diff.Line{Kind: diff.Add, NewNo: 10}); got != "●" {
+	if got := w.MarkerFor(thread, diff.Line{Kind: diff.Add, NewNo: 10}); got != "∗" {
 		t.Fatalf("start marker=%q", got)
 	}
 	if got := w.MarkerFor(thread, diff.Line{Kind: diff.Add, NewNo: 11}); got != "│" {

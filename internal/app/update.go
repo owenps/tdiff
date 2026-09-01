@@ -192,7 +192,6 @@ func (m Model) updateComposer(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *Model) closeComposer() {
 	m.composing = false
-	m.composerBaseView = ""
 	m.session.CancelRange()
 	m.editingThreadID = ""
 	m.replyingThreadID = ""
@@ -204,7 +203,7 @@ func (m *Model) closeComposer() {
 func (m *Model) updateWindowSize(msg tea.WindowSizeMsg) {
 	m.width = msg.Width
 	m.height = msg.Height
-	m.editor.SetWidth(max(20, msg.Width-32))
+	m.editor.SetWidth(m.diffWidth())
 	m.ensureCursorVisible()
 }
 
@@ -271,7 +270,7 @@ func (m Model) updateKey(msg tea.KeyMsg, previousStatus string) (tea.Model, tea.
 	case "s":
 		m.pendingKey = ""
 		m.split = !m.split
-		m.ensureSplitCursorVisible(m.bodyHeight())
+		m.ensureSplitCursorVisible(m.diffContentHeight())
 	case "x":
 		m.pendingKey = ""
 		m.syntax = !m.syntax
@@ -303,7 +302,7 @@ func (m Model) updateKey(msg tea.KeyMsg, previousStatus string) (tea.Model, tea.
 	case "w":
 		m.pendingKey = ""
 		m.wrapCursorLine = !m.wrapCursorLine
-		m.ensureSplitCursorVisible(m.bodyHeight())
+		m.ensureSplitCursorVisible(m.diffContentHeight())
 		m.status = fmt.Sprintf("wrap cursor line: %t", m.wrapCursorLine)
 	case "L":
 		m.pendingKey = ""

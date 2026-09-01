@@ -61,6 +61,22 @@ func TestRenderSidebarUsesCompactedStats(t *testing.T) {
 	}
 }
 
+func TestRenderSidebarShowsNewAndDeletedFileIcons(t *testing.T) {
+	files := []diff.File{
+		{OldPath: "/dev/null", NewPath: "added.go", Hunks: []diff.Hunk{{Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+new"}}}}},
+		{OldPath: "deleted.go", NewPath: "/dev/null", Hunks: []diff.Hunk{{Lines: []diff.Line{{Kind: diff.Delete, OldNo: 1, Text: "-old"}}}}},
+	}
+	session := review.NewSession(files)
+	m := Model{store: &thread.Store{}, session: session, width: 100, changedFiles: make(map[string]bool)}
+
+	out := xansi.Strip(m.renderSidebar(5))
+	for _, want := range []string{"+ added.go", "− deleted.go"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("sidebar missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestChangedFileMarkerPersistsUntilAcknowledged(t *testing.T) {
 	oldFile := diff.File{NewPath: "a.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+old"}}}}}
 	newFile := diff.File{NewPath: "a.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+new"}}}}}
@@ -70,7 +86,7 @@ func TestChangedFileMarkerPersistsUntilAcknowledged(t *testing.T) {
 
 	m.updateChangedFiles([]diff.File{newFile})
 	out := xansi.Strip(m.renderSidebar(5))
-	if !strings.Contains(out, "◆") {
+	if !strings.Contains(out, "●") {
 		t.Fatalf("sidebar missing changed marker:\n%s", out)
 	}
 
@@ -82,7 +98,7 @@ func TestChangedFileMarkerPersistsUntilAcknowledged(t *testing.T) {
 	m.acknowledgeFileChange("a.go")
 	m.invalidateViewCache()
 	out = xansi.Strip(m.renderSidebar(5))
-	if strings.Contains(out, "◆") {
+	if strings.Contains(out, "●") {
 		t.Fatalf("sidebar still shows acknowledged marker:\n%s", out)
 	}
 }
@@ -137,6 +153,33 @@ func TestRefreshLoadedKeepsCursorAfterStoreReload(t *testing.T) {
 	}
 }
 
+func TestReviewViewShowsFullSelectedPathWithSidebar(t *testing.T) {
+	path := "internal/platform/deeply/nested/selected_file.go"
+	file := diff.File{OldPath: path, NewPath: path, Hunks: []diff.Hunk{{Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+new"}}}}}
+	m := Model{store: &thread.Store{}, session: review.NewSession([]diff.File{file}), width: 100, height: 12}
+
+	if out := xansi.Strip(m.reviewView()); !strings.Contains(out, path) {
+		t.Fatalf("review view missing full path:\n%s", out)
+	}
+}
+
+func TestDiffHeaderWrapsWithoutDroppingPath(t *testing.T) {
+	path := "internal/platform/exceptionally/deeply/nested/selected_file.go"
+	file := diff.File{OldPath: path, NewPath: path, Hunks: []diff.Hunk{{Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+new"}}}}}
+	m := Model{store: &thread.Store{}, session: review.NewSession([]diff.File{file}), width: 80}
+
+	out := xansi.Strip(m.renderDiffHeader(20))
+	joined := strings.ReplaceAll(strings.ReplaceAll(out, "\n", ""), " ", "")
+	if !strings.Contains(joined, path) {
+		t.Fatalf("wrapped header dropped path content:\n%s", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if xansi.StringWidth(line) > 20 {
+			t.Fatalf("header line width=%d:\n%s", xansi.StringWidth(line), out)
+		}
+	}
+}
+
 func TestCollapsedHeaderShowsViewedOnlyWhenViewed(t *testing.T) {
 	file := diff.File{NewPath: "file.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+new"}}}}}
 	store := &fakeViewedStore{viewed: map[string]string{}}
@@ -171,8 +214,8 @@ func TestRenderSidebarShowsReplyCounts(t *testing.T) {
 	if !strings.Contains(out, "↳2") {
 		t.Fatalf("sidebar missing reply count:\n%s", out)
 	}
-	if !strings.Contains(out, "○") {
-		t.Fatalf("sidebar missing read glyph:\n%s", out)
+	if !strings.Contains(out, "∗") {
+		t.Fatalf("sidebar missing thread glyph:\n%s", out)
 	}
 }
 
@@ -188,8 +231,8 @@ func TestRenderSidebarShowsUnreadGlyph(t *testing.T) {
 	m := Model{store: store, threads: workflow, session: session, width: 100}
 
 	out := xansi.Strip(m.renderSidebar(16))
-	if !strings.Contains(out, "●") {
-		t.Fatalf("sidebar missing unread glyph:\n%s", out)
+	if !strings.Contains(out, "∗") {
+		t.Fatalf("sidebar missing thread glyph:\n%s", out)
 	}
 }
 

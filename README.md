@@ -110,7 +110,7 @@ Run `tdiff --debug` to write integration/debug failures to `.git/tdiff/debug.log
 
 ## Keybinds
 
-- <kbd>?</kbd> show/hide keybind help modal
+- <kbd>?</kbd> show/hide keybind help pane
 - <kbd>q</kbd> quit
 - <kbd>j</kbd>/<kbd>k</kbd> move line
 - <kbd>gg</kbd>/<kbd>G</kbd> jump top/bottom

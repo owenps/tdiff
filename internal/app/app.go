@@ -1204,7 +1204,7 @@ func (m Model) renderStatus() string {
 		parts = append(parts, dimStyle.Render("offline"))
 	}
 	if m.store != nil && m.store.GitHub != nil && m.store.GitHub.Number > 0 {
-		parts = append(parts, prStatusView(*m.store.GitHub))
+		parts = append(parts, dimStyle.Render(fmt.Sprintf("PR #%d", m.store.GitHub.Number)))
 	}
 	if m.split {
 		parts = append(parts, dimStyle.Render("split"))
@@ -1257,26 +1257,6 @@ func (m Model) renderStatus() string {
 
 func joinDim(parts []string, sep string) string {
 	return strings.Join(parts, dimStyle.Render(sep))
-}
-
-func prStatusView(pr gh.AttachedPR) string {
-	label := fmt.Sprintf("PR #%d", pr.Number)
-	switch pr.Status {
-	case gh.PRStatusReady:
-		return successStyle.Render(label + " ready")
-	case gh.PRStatusDraft:
-		return dimStyle.Render(label + " draft")
-	case gh.PRStatusBehind:
-		return blueStyle.Render(label + " behind")
-	case gh.PRStatusBlocked:
-		return errorStyle.Render(label + " blocked")
-	case gh.PRStatusMerged:
-		return purpleStyle.Render(label + " merged")
-	case gh.PRStatusClosed:
-		return dimStyle.Render(label + " closed")
-	default:
-		return dimStyle.Render(label)
-	}
 }
 
 func statusView(s string) string {

@@ -23,24 +23,14 @@ func TestStatusFooterHintsHaveNoLeadingDot(t *testing.T) {
 	}
 }
 
-func TestPRStatusViewLabelsOnlyImportantStates(t *testing.T) {
-	cases := []struct {
-		status gh.PRStatus
-		want   string
-	}{
-		{status: "", want: "PR #12"},
-		{status: gh.PRStatusReady, want: "PR #12 ready"},
-		{status: gh.PRStatusDraft, want: "PR #12 draft"},
-		{status: gh.PRStatusBehind, want: "PR #12 behind"},
-		{status: gh.PRStatusBlocked, want: "PR #12 blocked"},
-		{status: gh.PRStatusMerged, want: "PR #12 merged"},
-		{status: gh.PRStatusClosed, want: "PR #12 closed"},
-	}
-	for _, tc := range cases {
-		got := xansi.Strip(prStatusView(gh.AttachedPR{Number: 12, Status: tc.status}))
-		if got != tc.want {
-			t.Fatalf("status %q = %q, want %q", tc.status, got, tc.want)
-		}
+func TestStatusShowsPRNumberWithoutStatus(t *testing.T) {
+	m := diffPaneTestModel(false)
+	m.width = 100
+	m.store.GitHub = &gh.AttachedPR{Number: 12, Status: gh.PRStatusBlocked}
+
+	out := xansi.Strip(m.renderStatus())
+	if !strings.Contains(out, "PR #12") || strings.Contains(out, "blocked") {
+		t.Fatalf("status = %q", out)
 	}
 }
 

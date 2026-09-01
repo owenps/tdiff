@@ -29,6 +29,23 @@ type Config struct {
 	Debug            bool
 }
 
+type composerMode uint8
+
+const (
+	composerClosed composerMode = iota
+	composerNew
+	composerEdit
+	composerReply
+)
+
+type composerState struct {
+	mode     composerMode
+	threadID string
+	target   threadworkflow.Target
+}
+
+func (c composerState) active() bool { return c.mode != composerClosed }
+
 type Model struct {
 	repo          git.Repo
 	cfg           Config
@@ -53,10 +70,7 @@ type Model struct {
 	showHelp          bool
 	hideSidebar       bool
 	hideInlineThreads bool
-	composing         bool
-	editingThreadID   string
-	replyingThreadID  string
-	pendingTarget     threadworkflow.Target
+	composer          composerState
 	editor            textarea.Model
 	prPicker          prPicker
 	prAttaching       bool
@@ -155,7 +169,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		next.markSelectedThreadRead()
 		return next, cmd
 	}
-	if m.composing {
+	if m.composer.active() {
 		return m.updateComposer(msg)
 	}
 
@@ -190,24 +204,8 @@ const composerHint = "⌥+enter save · esc cancel"
 
 func (m Model) composerEditorRows(width int) []string {
 	editor := m.editor
-	editor.Prompt = ""
 	editor.SetWidth(max(1, width))
 	return strings.Split(editor.View(), "\n")
-}
-
-func (m Model) renderComposer(width int) string {
-	width = max(4, width)
-	innerWidth := width - 4
-	borderWidth := width - 2
-	label := truncate("─ "+composerHint+" ", borderWidth)
-	top := "╭" + label + strings.Repeat("─", max(0, borderWidth-xansi.StringWidth(label))) + "╮"
-	rows := []string{threadStyle.Render(top)}
-	for _, line := range m.composerEditorRows(innerWidth) {
-		body := padRight(truncate(line, innerWidth), innerWidth)
-		rows = append(rows, threadStyle.Render("│ ")+body+threadStyle.Render(" │"))
-	}
-	rows = append(rows, threadStyle.Render("╰"+strings.Repeat("─", width-2)+"╯"))
-	return strings.Join(rows, "\n")
 }
 
 func (m Model) ready() bool {
@@ -229,9 +227,9 @@ func (m Model) reviewView() string {
 			body = dimStyle.Render("clean tree · nothing to review")
 		}
 	} else {
-		header := m.renderDiffHeader(m.diffWidth())
-		diffPane := m.renderDiff(m.diffContentHeight())
-		diffColumn := header + "\n" + diffPane
+		headerRows := m.diffHeaderRows(m.diffWidth())
+		diffPane := m.renderDiff(max(1, bodyHeight-len(headerRows)))
+		diffColumn := strings.Join(headerRows, "\n") + "\n" + diffPane
 		body = diffColumn
 		if m.sidebarVisible() {
 			sidebar := m.renderSidebar(bodyHeight)
@@ -442,7 +440,7 @@ func (m Model) compareTargetLabel() string {
 }
 
 func (m Model) shouldAutoRefresh() bool {
-	return m.ready() && !m.composing && !m.prPicker.Active() && !m.prAttaching && !m.refreshing && m.store != nil
+	return m.ready() && !m.composer.active() && !m.prPicker.Active() && !m.prAttaching && !m.refreshing && m.store != nil
 }
 
 func (m *Model) reloadStore() error {
@@ -534,37 +532,24 @@ func (m *Model) startEditThread(t thread.Thread) error {
 	if !thread.CanEditLatestMessage(t) {
 		return fmt.Errorf("can only edit latest local message")
 	}
-	m.editingThreadID = t.ID
-	m.replyingThreadID = ""
-	m.pendingTarget = threadworkflow.Target{}
-	m.editor.Reset()
-	m.editor.Placeholder = "edit latest reply…"
-	m.editor.SetWidth(m.diffWidth())
-	m.editor.SetValue(thread.LastMessage(t).Body)
-	m.composing = true
-	m.editor.Focus()
+	m.startComposer(composerState{mode: composerEdit, threadID: t.ID}, "edit latest reply…", thread.LastMessage(t).Body)
 	return nil
 }
 
 func (m *Model) startReplyThread(t thread.Thread) {
-	m.editingThreadID = ""
-	m.replyingThreadID = t.ID
-	m.pendingTarget = threadworkflow.Target{}
-	m.editor.Reset()
-	m.editor.Placeholder = "reply…"
-	m.editor.SetWidth(m.diffWidth())
-	m.composing = true
-	m.editor.Focus()
+	m.startComposer(composerState{mode: composerReply, threadID: t.ID}, "reply…", "")
 }
 
 func (m *Model) startNewThread(target threadworkflow.Target) {
-	m.editingThreadID = ""
-	m.replyingThreadID = ""
-	m.pendingTarget = target
+	m.startComposer(composerState{mode: composerNew, target: target}, "add review comment…", "")
+}
+
+func (m *Model) startComposer(composer composerState, placeholder, value string) {
+	m.composer = composer
 	m.editor.Reset()
-	m.editor.Placeholder = "add review comment…"
+	m.editor.Placeholder = placeholder
 	m.editor.SetWidth(m.diffWidth())
-	m.composing = true
+	m.editor.SetValue(value)
 	m.editor.Focus()
 }
 
@@ -738,9 +723,9 @@ func threadBadgeText(count, unread int) string {
 		return ""
 	}
 	if unread > 0 {
-		return fmt.Sprintf("∗%d", unread)
+		return fmt.Sprintf("%s%d", threadMarker, unread)
 	}
-	return fmt.Sprintf("∗%d", count)
+	return fmt.Sprintf("%s%d", threadMarker, count)
 }
 
 func threadBadgeView(count, unread int) string {
@@ -762,14 +747,14 @@ func sidebarHeader(stats, threads string) string {
 	return strings.Join(parts, " ")
 }
 
-func selectedSidebarLine(prefix, viewed, status string, statusKind diff.Kind, nameW int, path, added, deleted, threadBadge string, threadW int) string {
+func selectedSidebarLine(prefix, viewed string, statusKind diff.Kind, nameW int, path, added, deleted, threadBadge string, threadW int) string {
 	rail := selectedStyle.Render(prefix)
 	if strings.Contains(prefix, "▌") {
 		rail = selectedThreadStyle.Render("▌") + selectedStyle.Render(" ")
 	}
 	line := rail +
 		selectedStyle.Render(viewed+" ") +
-		selectedFileStatus(status, statusKind) + selectedStyle.Render(" ") +
+		selectedFileStatus(statusKind) + selectedStyle.Render(" ") +
 		sidebarPath(path, nameW, true, viewed == "✓") +
 		selectedStyle.Render(" ") +
 		selectedAddStyle.Render(added) +
@@ -780,42 +765,53 @@ func selectedSidebarLine(prefix, viewed, status string, statusKind diff.Kind, na
 	return padRightStyled(line, sidebarWidth, selectedStyle)
 }
 
-func fileStatus(f diff.File, changed bool) (string, diff.Kind) {
+func fileStatusKind(f diff.File, changed bool) diff.Kind {
 	switch {
 	case f.OldPath == "/dev/null":
-		return "+", diff.Add
+		return diff.Add
 	case f.NewPath == "/dev/null":
-		return "−", diff.Delete
+		return diff.Delete
 	case changed:
-		return "●", diff.Meta
+		return diff.Meta
 	default:
-		return " ", diff.Context
+		return diff.Context
 	}
 }
 
-func sidebarFileStatus(status string, kind diff.Kind) string {
-	if kind == diff.Meta {
-		return threadStyle.Render(status)
+func fileStatusGlyph(kind diff.Kind) string {
+	switch kind {
+	case diff.Add:
+		return "+"
+	case diff.Delete:
+		return "−"
+	case diff.Meta:
+		return "●"
+	default:
+		return " "
 	}
-	return colorLine(kind, status)
 }
 
-func selectedFileStatus(status string, kind diff.Kind) string {
+func sidebarFileStatus(kind diff.Kind) string {
+	glyph := fileStatusGlyph(kind)
 	if kind == diff.Meta {
-		return selectedThreadStyle.Render(status)
+		return threadStyle.Render(glyph)
 	}
-	return selectedColorLine(kind, status)
+	return colorLine(kind, glyph)
+}
+
+func selectedFileStatus(kind diff.Kind) string {
+	glyph := fileStatusGlyph(kind)
+	if kind == diff.Meta {
+		return selectedThreadStyle.Render(glyph)
+	}
+	return selectedColorLine(kind, glyph)
 }
 
 func sidebarThreadView(badge string, width int) string {
-	thread := strings.Repeat(" ", width)
-	if badge != "" {
-		thread = fmt.Sprintf("%*s", width, badge)
+	if badge == "" {
+		return dimStyle.Render(strings.Repeat(" ", width))
 	}
-	if badge != "" {
-		return threadStyle.Render(thread)
-	}
-	return dimStyle.Render(thread)
+	return threadStyle.Render(fmt.Sprintf("%*s", width, badge))
 }
 
 func selectedSidebarThreadView(badge string, width int) string {
@@ -1059,17 +1055,16 @@ func (m Model) renderSidebar(height int) string {
 		if m.session.IsViewed(path) {
 			viewed = "✓"
 		}
-		status, statusKind := fileStatus(f, m.changedFiles[path])
+		statusKind := fileStatusKind(f, m.changedFiles[path])
 		stats := m.fileStats(f)
-		threadCount := m.threadCount(path)
-		threadBadge := threadBadgeText(threadCount, m.unreadThreadCount(path))
+		threadBadge := threadBadgeText(m.threadCount(path), m.unreadThreadCount(path))
 		addedText := fmt.Sprintf("%*s", addW, sidebarStat("+", stats.Added))
 		deletedText := fmt.Sprintf("%*s", delW, sidebarStat("-", stats.Deleted))
 		added := addStyle.Render(addedText)
 		deleted := deleteStyle.Render(deletedText)
-		line := fmt.Sprintf("%s%s %s %s %s %s %s", prefix, viewed, sidebarFileStatus(status, statusKind), sidebarPath(path, nameW, false, viewed == "✓"), added, deleted, sidebarThreadView(threadBadge, threadW))
+		line := fmt.Sprintf("%s%s %s %s %s %s %s", prefix, viewed, sidebarFileStatus(statusKind), sidebarPath(path, nameW, false, viewed == "✓"), added, deleted, sidebarThreadView(threadBadge, threadW))
 		if i == fileIdx {
-			line = selectedSidebarLine(prefix, viewed, status, statusKind, nameW, path, addedText, deletedText, threadBadge, threadW)
+			line = selectedSidebarLine(prefix, viewed, statusKind, nameW, path, addedText, deletedText, threadBadge, threadW)
 		} else if viewed == "✓" {
 			line = dimStyle.Render(line)
 		}
@@ -1130,10 +1125,9 @@ func (m Model) renderThreadPreview(maxRows int) []string {
 		if replies > 0 {
 			replySuffix = fmt.Sprintf(" ↳%d", replies)
 		}
-		glyph := threadGlyph(p.Thread)
-		loc := fmt.Sprintf("%s %s:%d%s", glyph, compactPath(p.Thread.Path, sidebarWidth-8-xansi.StringWidth(replySuffix)), p.Thread.LineStart, replySuffix)
+		loc := fmt.Sprintf("%s %s:%d%s", threadMarker, compactPath(p.Thread.Path, sidebarWidth-8-xansi.StringWidth(replySuffix)), p.Thread.LineStart, replySuffix)
 		if p.Thread.LineEnd != 0 && p.Thread.LineEnd != p.Thread.LineStart {
-			loc = fmt.Sprintf("%s %s:%d-%d%s", glyph, compactPath(p.Thread.Path, sidebarWidth-10-xansi.StringWidth(replySuffix)), p.Thread.LineStart, p.Thread.LineEnd, replySuffix)
+			loc = fmt.Sprintf("%s %s:%d-%d%s", threadMarker, compactPath(p.Thread.Path, sidebarWidth-10-xansi.StringWidth(replySuffix)), p.Thread.LineStart, p.Thread.LineEnd, replySuffix)
 		}
 		bodyText := strings.ReplaceAll(thread.Body(p.Thread), "\n", " ")
 		if author := threadAuthor(p.Thread); author != "" {
@@ -1160,7 +1154,7 @@ func (m Model) renderThreadPreview(maxRows int) []string {
 	return rows
 }
 
-func (m Model) renderDiffHeader(width int) string {
+func (m Model) diffHeaderRows(width int) []string {
 	width = max(1, width)
 	pathRows := strings.Split(strings.TrimSuffix(xansi.Hardwrap(m.currentPath(), width, false), "\n"), "\n")
 	rows := make([]string, 0, len(pathRows)+1)
@@ -1181,12 +1175,15 @@ func (m Model) renderDiffHeader(width int) string {
 		gap := max(0, width-xansi.StringWidth(stats)-xansi.StringWidth(viewed))
 		rows = append(rows, stats+strings.Repeat(" ", gap)+viewed)
 	}
-	return strings.Join(rows, "\n")
+	return rows
+}
+
+func (m Model) renderDiffHeader(width int) string {
+	return strings.Join(m.diffHeaderRows(width), "\n")
 }
 
 func (m Model) diffContentHeight() int {
-	headerHeight := strings.Count(m.renderDiffHeader(m.diffWidth()), "\n") + 1
-	return max(1, m.bodyHeight()-headerHeight)
+	return max(1, m.bodyHeight()-len(m.diffHeaderRows(m.diffWidth())))
 }
 
 func (m Model) renderStatus() string {
@@ -1377,22 +1374,20 @@ func helpBox(title string, lines []string, width, height int) string {
 }
 
 func (m *Model) saveThread() error {
-	if m.replyingThreadID != "" {
+	switch m.composer.mode {
+	case composerReply:
 		body := strings.TrimSpace(m.editor.Value())
 		if body == "" {
 			return fmt.Errorf("empty thread")
 		}
-		return m.store.Reply(m.replyingThreadID, thread.Message{Actor: thread.ActorHuman, Body: body})
+		return m.store.Reply(m.composer.threadID, thread.Message{Actor: thread.ActorHuman, Body: body})
+	case composerEdit:
+		return m.threads.Save(m.currentPath(), m.session.DiffHash(), m.composer.threadID, threadworkflow.Target{}, m.editor.Value())
+	case composerNew:
+		return m.threads.Save(m.currentPath(), m.session.DiffHash(), "", m.composer.target, m.editor.Value())
+	default:
+		return fmt.Errorf("comment editor closed")
 	}
-	target := m.pendingTarget
-	if m.editingThreadID == "" && target.LineStart == 0 {
-		var err error
-		target, err = m.singleLineTarget()
-		if err != nil {
-			return err
-		}
-	}
-	return m.threads.Save(m.currentPath(), m.session.DiffHash(), m.editingThreadID, target, m.editor.Value())
 }
 
 const (

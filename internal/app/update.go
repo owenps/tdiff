@@ -10,7 +10,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	gh "github.com/owenps/tdiff/internal/github"
 	"github.com/owenps/tdiff/internal/thread"
-	"github.com/owenps/tdiff/internal/threadworkflow"
 )
 
 func (m Model) handleAsyncMsg(msg tea.Msg) (Model, tea.Cmd, bool) {
@@ -191,11 +190,8 @@ func (m Model) updateComposer(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) closeComposer() {
-	m.composing = false
+	m.composer = composerState{}
 	m.session.CancelRange()
-	m.editingThreadID = ""
-	m.replyingThreadID = ""
-	m.pendingTarget = threadworkflow.Target{}
 	m.editor.Blur()
 	m.editor.Reset()
 }

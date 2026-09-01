@@ -401,29 +401,22 @@ func (s *Store) ReviewStatus(diffHash string) string {
 }
 
 func (s *Store) MarkThreadRead(id string) error {
-	if _, err := s.MarkThreadReadLocal(id); err != nil {
-		return err
-	}
-	if s.path == "" {
-		return nil
-	}
-	return s.Save()
-}
-
-func (s *Store) MarkThreadReadLocal(id string) (bool, error) {
 	for i := range s.Threads {
 		if s.Threads[i].ID != id {
 			continue
 		}
 		last := LastMessage(s.Threads[i])
 		if last.ID == "" || s.Threads[i].ReadMessageID == last.ID {
-			return false, nil
+			return nil
 		}
 		s.Threads[i].ReadMessageID = last.ID
 		s.setThreadRead(id, last.ID)
-		return true, nil
+		if s.path == "" {
+			return nil
+		}
+		return s.Save()
 	}
-	return false, fmt.Errorf("thread not found")
+	return fmt.Errorf("thread not found")
 }
 
 func (s *Store) invalidateApprovalFor(diffHash string) {

@@ -145,6 +145,21 @@ func TestUnreadForHumanTracksNonHumanLatestReply(t *testing.T) {
 	}
 }
 
+func TestMarkThreadReadDoesNotSaveWhenAlreadyRead(t *testing.T) {
+	store := &Store{
+		path: t.TempDir(), // Saving to a directory would fail.
+		Threads: []Thread{{
+			ID:            "n1",
+			ReadMessageID: "m1",
+			Messages:      []Message{{ID: "m1", Actor: ActorAgent, Body: "reply"}},
+		}},
+	}
+
+	if err := store.MarkThreadRead("n1"); err != nil {
+		t.Fatalf("already-read thread triggered save: %v", err)
+	}
+}
+
 func TestClearThreadsRemovesAnnotationsAndReads(t *testing.T) {
 	store := tempStoreForStoreTest(t)
 	if err := store.Add(Thread{ID: "n1", Path: "a.go", Side: SideNew, Line: 1, Messages: []Message{{Actor: ActorHuman, Body: "first"}}}); err != nil {

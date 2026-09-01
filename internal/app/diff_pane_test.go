@@ -37,26 +37,24 @@ func TestDiffPaneRendersUnifiedThreadAndRange(t *testing.T) {
 	}
 }
 
-func TestDiffPaneRendersUnreadThreadStartInRail(t *testing.T) {
-	m := diffPaneTestModel(false)
-	m.store.Threads[0].Messages = []thread.Message{{ID: "m1", Actor: thread.ActorAgent, Body: "fixed"}}
-	m.session.SetStores(m.store, m.store)
+func TestDiffPaneRendersThreadStartInRailRegardlessOfReadState(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		read bool
+	}{{"unread", false}, {"read", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := diffPaneTestModel(false)
+			m.store.Threads[0].Messages = []thread.Message{{ID: "m1", Actor: thread.ActorAgent, Body: "fixed"}}
+			if tc.read {
+				m.store.Threads[0].ReadMessageID = "m1"
+			}
+			m.session.SetStores(m.store, m.store)
 
-	out := xansi.Strip(m.renderDiff(4))
-	if !strings.Contains(out, "∗") {
-		t.Fatalf("rendered diff missing thread start:\n%s", out)
-	}
-}
-
-func TestDiffPaneRendersReadThreadStartInRail(t *testing.T) {
-	m := diffPaneTestModel(false)
-	m.store.Threads[0].Messages = []thread.Message{{ID: "m1", Actor: thread.ActorAgent, Body: "fixed"}}
-	m.store.Threads[0].ReadMessageID = "m1"
-	m.session.SetStores(m.store, m.store)
-
-	out := xansi.Strip(m.renderDiff(4))
-	if !strings.Contains(out, "∗") {
-		t.Fatalf("rendered diff missing thread start:\n%s", out)
+			out := xansi.Strip(m.renderDiff(4))
+			if !strings.Contains(out, threadMarker) {
+				t.Fatalf("rendered diff missing thread start:\n%s", out)
+			}
+		})
 	}
 }
 
@@ -511,8 +509,8 @@ func TestEditThreadRequiresLatestHumanMessage(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	got := updated.(Model)
-	if got.composing || got.status != "can only edit latest local message" {
-		t.Fatalf("edit = composing %t status %q", got.composing, got.status)
+	if got.composer.active() || got.status != "can only edit latest local message" {
+		t.Fatalf("edit = composing %t status %q", got.composer.active(), got.status)
 	}
 }
 
@@ -527,8 +525,8 @@ func TestEditThreadStartsWithLatestHumanMessage(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	got := updated.(Model)
-	if !got.composing || got.editor.Value() != "latest" || got.editor.Placeholder != "edit latest reply…" {
-		t.Fatalf("edit = composing %t editor %q placeholder %q", got.composing, got.editor.Value(), got.editor.Placeholder)
+	if !got.composer.active() || got.editor.Value() != "latest" || got.editor.Placeholder != "edit latest reply…" {
+		t.Fatalf("edit = composing %t editor %q placeholder %q", got.composer.active(), got.editor.Value(), got.editor.Placeholder)
 	}
 }
 
@@ -547,7 +545,7 @@ func TestComposerRendersInlineEditableBoxWithoutFooterOrIndent(t *testing.T) {
 	m := diffPaneTestModel(false)
 	m.width = 80
 	m.height = 20
-	m.composing = true
+	m.composer = composerState{mode: composerNew}
 	m.editor.SetValue("reply body")
 
 	view := xansi.Strip(m.View())
@@ -665,7 +663,7 @@ func TestThreadReplyEditsInsideItsCard(t *testing.T) {
 
 func TestComposerControlKeys(t *testing.T) {
 	m := diffPaneTestModel(false)
-	m.composing = true
+	m.composer = composerState{mode: composerNew}
 	m.editor.SetValue("reply body")
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlA})
@@ -680,8 +678,8 @@ func TestComposerControlKeys(t *testing.T) {
 	}
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	m = updated.(Model)
-	if got := m.editor.Value(); got != "" || !m.composing {
-		t.Fatalf("ctrl+c value=%q composing=%t, want cleared and composing", got, m.composing)
+	if got := m.editor.Value(); got != "" || !m.composer.active() {
+		t.Fatalf("ctrl+c value=%q composing=%t, want cleared and composing", got, m.composer.active())
 	}
 }
 

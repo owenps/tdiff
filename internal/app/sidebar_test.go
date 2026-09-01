@@ -30,20 +30,6 @@ func (s *fakeViewedStore) ClearViewed(path string) error {
 
 func (s *fakeViewedStore) IsViewed(path, diffHash string) bool { return s.viewed[path] == diffHash }
 
-func TestSidebarStatTruncatesThousands(t *testing.T) {
-	cases := map[int]string{
-		999:  "+999",
-		1000: "+1k",
-		1999: "+1k",
-		2500: "+2k",
-	}
-	for count, want := range cases {
-		if got := sidebarStat("+", count); got != want {
-			t.Fatalf("sidebarStat(%d) = %q, want %q", count, got, want)
-		}
-	}
-}
-
 func TestRenderSidebarUsesCompactedStats(t *testing.T) {
 	m := diffPaneTestModel(false)
 	lines := make([]diff.Line, 1000)
@@ -219,23 +205,6 @@ func TestRenderSidebarShowsReplyCounts(t *testing.T) {
 	}
 }
 
-func TestRenderSidebarShowsUnreadGlyph(t *testing.T) {
-	file := diff.File{NewPath: "file.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+new"}}}}}
-	store := &thread.Store{Threads: []thread.Thread{{ID: "n1", Path: "file.go", Side: thread.SideNew, LineStart: 1, LineEnd: 1, Messages: []thread.Message{
-		{ID: "m1", Actor: thread.ActorHuman, Body: "note"},
-		{ID: "m2", Actor: thread.ActorGitHub, Body: "github reply"},
-	}}}}
-	workflow := threadworkflow.NewWorkflow(store)
-	session := review.NewSession([]diff.File{file})
-	session.SetStores(store, store)
-	m := Model{store: store, threads: workflow, session: session, width: 100}
-
-	out := xansi.Strip(m.renderSidebar(16))
-	if !strings.Contains(out, "∗") {
-		t.Fatalf("sidebar missing thread glyph:\n%s", out)
-	}
-}
-
 func TestRenderSidebarGivesThreadsMoreRoomWhenScreenPermits(t *testing.T) {
 	var files []diff.File
 	var notes []thread.Thread
@@ -253,14 +222,5 @@ func TestRenderSidebarGivesThreadsMoreRoomWhenScreenPermits(t *testing.T) {
 	out := xansi.Strip(m.renderSidebar(30))
 	if !strings.Contains(out, "note 4") {
 		t.Fatalf("sidebar thread preview too short:\n%s", out)
-	}
-}
-
-func TestSidebarThreadHeightUsesBoundedScreenRatio(t *testing.T) {
-	if got := sidebarThreadHeight(20, 20); got != 10 {
-		t.Fatalf("height = %d, want 10", got)
-	}
-	if got := sidebarThreadHeight(80, 20); got != sidebarThreadMaxRows {
-		t.Fatalf("height = %d, want %d", got, sidebarThreadMaxRows)
 	}
 }

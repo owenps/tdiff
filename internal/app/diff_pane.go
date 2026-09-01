@@ -18,7 +18,10 @@ import (
 	"github.com/owenps/tdiff/internal/threadtarget"
 )
 
-const inlineThreadMinScreenRows = 8
+const (
+	inlineThreadMinScreenRows = 8
+	threadMarker              = "∗"
+)
 
 type threadMarkers map[thread.Side]map[int]string
 
@@ -35,7 +38,7 @@ func newThreadMarkers(threads []thread.Thread) threadMarkers {
 		for line := start; line <= end; line++ {
 			glyph := "│"
 			if start == end || line == start {
-				glyph = threadGlyph(thread)
+				glyph = threadMarker
 			} else if line == end {
 				glyph = "╰"
 			}
@@ -45,10 +48,6 @@ func newThreadMarkers(threads []thread.Thread) threadMarkers {
 		}
 	}
 	return markers
-}
-
-func threadGlyph(thread.Thread) string {
-	return "∗"
 }
 
 func (m threadMarkers) markerForLine(line diff.Line) string {
@@ -62,6 +61,15 @@ func (m threadMarkers) markerForLine(line diff.Line) string {
 	}
 	return ""
 }
+
+type diffPaneComposer struct {
+	mode     composerMode
+	threadID string
+	anchor   int
+	rows     []string
+}
+
+func (c diffPaneComposer) active() bool { return c.mode != composerClosed }
 
 type diffPane struct {
 	path              string
@@ -81,11 +89,7 @@ type diffPane struct {
 	inlineThreads     bool
 	selectedThread    thread.Thread
 	hasSelectedThread bool
-	composerRows      []string
-	composerBodyRows  []string
-	composerThreadID  string
-	composerEditing   bool
-	composerAnchor    int
+	composer          diffPaneComposer
 }
 
 func (m Model) renderDiff(height int) string {
@@ -135,37 +139,36 @@ func (m Model) diffPane(width int) diffPane {
 		selectedThread:    selectedThread,
 		hasSelectedThread: hasSelectedThread,
 	}
-	if m.composing {
-		pane.composerAnchor = m.session.LineIndex()
-		pane.composerThreadID = m.editingThreadID
-		pane.composerEditing = m.editingThreadID != ""
-		if pane.composerThreadID == "" {
-			pane.composerThreadID = m.replyingThreadID
+	if m.composer.active() {
+		pane.composer = diffPaneComposer{
+			mode:     m.composer.mode,
+			threadID: m.composer.threadID,
+			anchor:   m.session.LineIndex(),
 		}
 		for _, t := range fileThreads {
-			if t.ID == pane.composerThreadID {
+			if t.ID == pane.composer.threadID {
 				if anchor := pane.threadAnchorIndex(t); anchor >= 0 {
-					pane.composerAnchor = anchor
+					pane.composer.anchor = anchor
 				}
 				break
 			}
 		}
-		if m.pendingTarget.LineStart > 0 {
+		if m.composer.target.LineStart > 0 {
 			target := thread.Thread{
 				Path:      path,
-				Side:      m.pendingTarget.Side,
-				LineStart: m.pendingTarget.LineStart,
-				LineEnd:   m.pendingTarget.LineEnd,
+				Side:      m.composer.target.Side,
+				LineStart: m.composer.target.LineStart,
+				LineEnd:   m.composer.target.LineEnd,
 			}
 			if anchor := pane.threadAnchorIndex(target); anchor >= 0 {
-				pane.composerAnchor = anchor
+				pane.composer.anchor = anchor
 			}
 		}
-		if pane.composerThreadID == "" {
-			pane.composerRows = strings.Split(m.renderComposer(width), "\n")
-		} else {
-			pane.composerBodyRows = m.composerEditorRows(max(1, width-6))
+		indent := 0
+		if pane.composer.threadID != "" {
+			indent = 2
 		}
+		pane.composer.rows = m.composerEditorRows(max(1, width-indent-4))
 	}
 	return pane
 }
@@ -492,12 +495,12 @@ type splitVisualRow struct {
 
 func (p diffPane) inlineThreadCards(height int) map[int][]string {
 	showThreads := p.inlineThreads && height >= inlineThreadMinScreenRows && p.width >= 24
-	if !showThreads && !p.hasComposer() {
+	if !showThreads && !p.composer.active() {
 		return nil
 	}
 	cards := make(map[int][]string)
 	for _, t := range p.threads {
-		editing := t.ID == p.composerThreadID
+		editing := t.ID == p.composer.threadID
 		if !showThreads && !editing {
 			continue
 		}
@@ -513,14 +516,10 @@ func (p diffPane) inlineThreadCards(height int) map[int][]string {
 			cards[anchor] = append(cards[anchor], rows...)
 		}
 	}
-	if p.composerThreadID == "" && p.composerAnchor >= 0 && len(p.composerRows) > 0 {
-		cards[p.composerAnchor] = append(cards[p.composerAnchor], p.composerRows...)
+	if p.composer.threadID == "" && p.composer.anchor >= 0 && len(p.composer.rows) > 0 {
+		cards[p.composer.anchor] = append(cards[p.composer.anchor], p.cardRows(0, composerHint, p.composer.rows)...)
 	}
 	return cards
-}
-
-func (p diffPane) hasComposer() bool {
-	return len(p.composerRows) > 0 || len(p.composerBodyRows) > 0
 }
 
 func lineVisualRows(lineCount int, cards map[int][]string) []lineVisualRow {
@@ -626,8 +625,8 @@ func visibleLineRange(rows []lineVisualRow) (int, int) {
 }
 
 func (p diffPane) selectedLineCardEnd(rows []lineVisualRow, cards map[int][]string) int {
-	anchor := p.composerAnchor
-	if !p.hasComposer() {
+	anchor := p.composer.anchor
+	if !p.composer.active() {
 		if !p.hasSelectedThread {
 			return -1
 		}
@@ -641,8 +640,8 @@ func (p diffPane) selectedLineCardEnd(rows []lineVisualRow, cards map[int][]stri
 }
 
 func (p diffPane) selectedSplitCardEnd(rows []splitVisualRow, cards map[int][]string, splitRows []splitRow) int {
-	lineAnchor := p.composerAnchor
-	if !p.hasComposer() {
+	lineAnchor := p.composer.anchor
+	if !p.composer.active() {
 		if !p.hasSelectedThread {
 			return -1
 		}
@@ -679,41 +678,46 @@ func (p diffPane) threadAnchorIndex(t thread.Thread) int {
 }
 
 func (p diffPane) threadCardRows(t thread.Thread) []string {
-	if p.width < 10 {
-		return nil
-	}
-	cardW := max(10, p.width-2)
-	innerW := max(1, cardW-4)
-	rows := []string{threadStyle.Render(p.threadCardBorder("╭", p.threadCardTitle(t), "╮", cardW))}
-	for _, msg := range inlineThreadRows(t.Messages, innerW) {
-		rows = append(rows, p.threadCardBody(msg, cardW))
-	}
-	rows = append(rows, threadStyle.Render(p.threadCardBorder("╰", "", "╯", cardW)))
-	return rows
+	return p.cardRows(2, p.threadCardTitle(t), inlineThreadRows(t.Messages, p.cardInnerWidth(2)))
 }
 
 func (p diffPane) editableThreadCardRows(t thread.Thread) []string {
-	if p.width < 10 {
-		return nil
-	}
-	cardW := max(10, p.width-2)
-	innerW := max(1, cardW-4)
 	messages := t.Messages
-	if p.composerEditing && len(messages) > 0 {
+	if p.composer.mode == composerEdit && len(messages) > 0 {
 		messages = messages[:len(messages)-1]
 	}
 	bodyRows := []string{}
 	if len(messages) > 0 {
-		bodyRows = inlineThreadRows(messages, innerW)
-		bodyRows = append(bodyRows, "")
+		bodyRows = append(inlineThreadRows(messages, p.cardInnerWidth(2)), "")
 	}
-	bodyRows = append(bodyRows, p.composerBodyRows...)
+	bodyRows = append(bodyRows, p.composer.rows...)
+	return p.cardRows(2, composerHint, bodyRows)
+}
 
-	rows := []string{threadStyle.Render(p.threadCardBorder("╭", composerHint, "╮", cardW))}
-	for _, row := range bodyRows {
-		rows = append(rows, p.threadCardBody(row, cardW))
+func (p diffPane) cardInnerWidth(indent int) int {
+	return max(1, p.width-indent-4)
+}
+
+func (p diffPane) cardRows(indent int, title string, bodyRows []string) []string {
+	width := p.width - indent
+	if width < 8 {
+		return nil
 	}
-	rows = append(rows, threadStyle.Render(p.threadCardBorder("╰", "", "╯", cardW)))
+	prefix := strings.Repeat(" ", indent)
+	borderWidth := width - 2
+	label := ""
+	if title != "" {
+		label = truncate("─ "+title+" ", borderWidth)
+	}
+	top := "╭" + label + strings.Repeat("─", max(0, borderWidth-xansi.StringWidth(label))) + "╮"
+	rows := []string{prefix + threadStyle.Render(top)}
+	innerWidth := p.cardInnerWidth(indent)
+	for _, row := range bodyRows {
+		body := truncate(row, innerWidth)
+		pad := strings.Repeat(" ", max(0, innerWidth-xansi.StringWidth(body)))
+		rows = append(rows, prefix+threadStyle.Render("│ ")+body+dimStyle.Render(pad)+threadStyle.Render(" │"))
+	}
+	rows = append(rows, prefix+threadStyle.Render("╰"+strings.Repeat("─", borderWidth)+"╯"))
 	return rows
 }
 
@@ -737,28 +741,6 @@ func threadReplyLabel(count int) string {
 		return "1 reply"
 	}
 	return fmt.Sprintf("%d replies", count)
-}
-
-func (p diffPane) threadCardBorder(left, text, right string, width int) string {
-	innerW := max(0, width-2)
-	if text == "" {
-		return "  " + left + strings.Repeat("─", innerW) + right
-	}
-	label := "─ " + text + " "
-	if xansi.StringWidth(label) > innerW {
-		label = truncate(label, innerW)
-	}
-	return "  " + left + label + strings.Repeat("─", max(0, innerW-xansi.StringWidth(label))) + right
-}
-
-func (p diffPane) threadCardBody(text string, width int) string {
-	innerW := max(0, width-4)
-	body := text
-	if xansi.StringWidth(body) > innerW {
-		body = truncate(body, innerW)
-	}
-	pad := strings.Repeat(" ", max(0, innerW-xansi.StringWidth(body)))
-	return threadStyle.Render("  │ ") + body + dimStyle.Render(pad) + threadStyle.Render(" │")
 }
 
 func inlineThreadRows(messages []thread.Message, width int) []string {

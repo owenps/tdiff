@@ -39,13 +39,8 @@ For GitHub integration, install the `gh` CLI.
 
 ## Working with agents
 
-There is no included skill, just tell your agent to use `tdiff` and it will learn through the CLI. 
-
-To monitor and react to events, tell your agent:
-
-```text
-Use tdiff for review comments. Run `tdiff agent help`, then wait for my tdiff review events and respond in threads.
-```
+> [!TIP]
+> There is no included skill, just tell your agent to use `tdiff` and it will learn through the CLI.
 
 Agent loop:
 
@@ -92,7 +87,6 @@ tdiff thread reply T123 --actor agent --body "Fixed and added test"
 tdiff thread resolve T123
 tdiff thread reopen T123
 # use --body - to read long thread text from stdin
-
 ```
 
 ## Data

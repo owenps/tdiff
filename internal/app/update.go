@@ -95,6 +95,7 @@ func (m *Model) handleRefreshLoaded(msg refreshLoadedMsg) {
 		return
 	}
 	anchor := m.cursorAnchor()
+	defer m.restoreCursor(anchor)
 	if err := m.reloadStore(); err != nil {
 		if msg.auto {
 			m.logDebug("auto store reload failed: %v", err)
@@ -106,7 +107,6 @@ func (m *Model) handleRefreshLoaded(msg refreshLoadedMsg) {
 	m.compareTarget = msg.compareTarget
 	m.updateChangedFiles(msg.snap.Files)
 	m.session.SetSnapshot(msg.snap.Files, msg.snap.Hash)
-	m.restoreCursor(anchor)
 	m.viewCache = make(map[string]string)
 	m.statsCache = make(map[string]diffStats)
 	m.syntaxCache = make(map[string]string)

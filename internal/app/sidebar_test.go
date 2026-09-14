@@ -10,6 +10,7 @@ import (
 	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/owenps/tdiff/internal/diff"
 	"github.com/owenps/tdiff/internal/git"
+	gh "github.com/owenps/tdiff/internal/github"
 	"github.com/owenps/tdiff/internal/review"
 	"github.com/owenps/tdiff/internal/snapshot"
 	"github.com/owenps/tdiff/internal/thread"
@@ -136,6 +137,43 @@ func TestRefreshLoadedKeepsCursorAfterStoreReload(t *testing.T) {
 
 	if m.currentPath() != "b.go" || m.session.LineIndex() != 2 {
 		t.Fatalf("path=%q line=%d", m.currentPath(), m.session.LineIndex())
+	}
+}
+
+func TestOnlineRefreshKeepsScrolledCursorAfterGitHubSync(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store, err := thread.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := make([]diff.Line, 20)
+	for i := range lines {
+		lines[i] = diff.Line{Kind: diff.Add, NewNo: i + 1, Text: fmt.Sprintf("+line %d", i+1)}
+	}
+	files := []diff.File{
+		{NewPath: "a.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1 @@", Lines: []diff.Line{{Kind: diff.Add, NewNo: 1, Text: "+a"}}}}},
+		{NewPath: "b.go", Hunks: []diff.Hunk{{Header: "@@ -0,0 +1,20 @@", Lines: lines}}},
+	}
+	m := Model{repo: git.Repo{Root: root}, store: store, threads: threadworkflow.NewWorkflow(store), session: review.NewSession(files), width: 100, height: 12}
+	m.session.SetStores(store, store)
+	m.session.JumpToIndex(1, 15, m.diffContentHeight())
+	wantOffset := m.session.DiffOffset()
+	if wantOffset == 0 {
+		t.Fatal("test cursor is not scrolled")
+	}
+
+	m.handleRefreshLoaded(refreshLoadedMsg{
+		snap:    snapshot.Snapshot{Files: files, Hash: "hash"},
+		pr:      &gh.AttachedPR{Owner: "o", Repo: "r", Number: 1},
+		threads: nil,
+		auto:    true,
+	})
+
+	if m.currentPath() != "b.go" || m.session.LineIndex() != 15 || m.session.DiffOffset() != wantOffset {
+		t.Fatalf("path=%q line=%d offset=%d, want b.go/15/%d", m.currentPath(), m.session.LineIndex(), m.session.DiffOffset(), wantOffset)
 	}
 }
 

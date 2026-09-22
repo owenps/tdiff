@@ -1155,6 +1155,10 @@ func (m Model) renderThreadPreview(maxRows int) []string {
 }
 
 func (m Model) diffHeaderRows(width int) []string {
+	files := m.session.Files()
+	if len(files) == 0 {
+		return nil
+	}
 	width = max(1, width)
 	pathRows := strings.Split(strings.TrimSuffix(xansi.Hardwrap(m.currentPath(), width, false), "\n"), "\n")
 	rows := make([]string, 0, len(pathRows)+1)
@@ -1162,7 +1166,7 @@ func (m Model) diffHeaderRows(width int) []string {
 		rows = append(rows, padRight(titleStyle.Render(row), width))
 	}
 
-	stats := m.statsView(m.fileStats(m.session.Files()[m.session.FileIndex()]))
+	stats := m.statsView(m.fileStats(files[m.session.FileIndex()]))
 	if threads := m.threadCount(m.currentPath()); threads > 0 {
 		stats = strings.TrimSpace(stats + " " + threadBadgeView(threads, m.unreadThreadCount(m.currentPath())))
 	}

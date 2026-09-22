@@ -133,6 +133,41 @@ func TestInlineThreadKeybindToggles(t *testing.T) {
 	}
 }
 
+func TestWindowSizeWithNoVisibleFiles(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		filtered bool
+		want     string
+	}{
+		{name: "empty diff", want: "clean tree · nothing to review"},
+		{name: "filtered diff", filtered: true, want: "no files match filters"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := diffPaneTestModel(false)
+			if tc.filtered {
+				m.store.Threads = nil
+				m.session.SetFilters(false, true)
+			} else {
+				m.session.SetSnapshot(nil, "")
+			}
+			for _, split := range []bool{false, true} {
+				m.split = split
+				updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 20})
+				got := updated.(Model)
+				if rows := got.diffHeaderRows(got.diffWidth()); len(rows) != 0 {
+					t.Fatalf("empty header = %q", rows)
+				}
+				if height := got.diffContentHeight(); height != got.bodyHeight() {
+					t.Fatalf("content height = %d, want %d", height, got.bodyHeight())
+				}
+				if out := xansi.Strip(got.View()); !strings.Contains(out, tc.want) {
+					t.Fatalf("view missing %q:\n%s", tc.want, out)
+				}
+			}
+		})
+	}
+}
+
 func TestSelectedUnreadThreadIsMarkedRead(t *testing.T) {
 	m := diffPaneTestModel(false)
 	m.store.Threads[0].Messages = []thread.Message{{ID: "m1", Actor: thread.ActorAgent, Body: "reply"}}
